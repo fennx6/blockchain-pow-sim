@@ -1,0 +1,28 @@
+# Image node worker: menyimpan rantai, memvalidasi blok, menambang, bergosip.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Lapisan dependensi dipisah dari kode agar rebuild cepat saat kode berubah.
+COPY requirements.txt pyproject.toml ./
+COPY src ./src
+COPY config ./config
+
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --no-deps .
+
+RUN useradd --create-home --uid 10001 chainsim \
+    && mkdir -p /app/logs /app/data \
+    && chown -R chainsim:chainsim /app
+
+USER chainsim
+
+# Port hanya dipakai di dalam network chainnet, tidak dipublikasikan ke host.
+EXPOSE 8081 50051
+
+CMD ["python", "-m", "chainsim.node.main"]

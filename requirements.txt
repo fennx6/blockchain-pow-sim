@@ -1,0 +1,22 @@
+# Dependensi runtime + pengujian (AGENTS.md Bagian 4).
+# Versi di-pin dengan `pip freeze` setelah instalasi pertama berhasil di mesin
+# yang menjalankan eksperimen final (catat di docs/lab-environment.md).
+
+# REST dan dashboard
+Flask>=3.0
+
+# Komunikasi antarnode
+grpcio>=1.62
+grpcio-tools>=1.62
+protobuf>=5.26
+
+# Konfigurasi
+PyYAML>=6.0
+
+# Pengujian dan kualitas kode
+pytest>=8.0
+ruff>=0.6
+
+# Analisis eksperimen (hanya dipakai di experiments/)
+pandas>=2.2
+matplotlib>=3.9

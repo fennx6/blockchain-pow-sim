@@ -1,0 +1,3 @@
+Folder kontrak protobuf. File ``blockchain.proto`` ditulis oleh anggota B
+(AGENTS.md Bagian 3); folder ini sengaja dibuat di Fase 0 agar skrip generate
+punya tujuan yang jelas.

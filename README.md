@@ -1,0 +1,142 @@
+# Simulasi Blockchain Terdistribusi (chainsim)
+
+Proyek UAS Komputasi Paralel dan Terdistribusi, Tema 4: simulasi blockchain
+terdistribusi dengan Proof-of-Work, konsensus rantai terpanjang, dan pemulihan
+setelah node gagal. Dibangun dengan Flask, gRPC, dan Docker.
+
+> Status: **Fase 0 - kerangka proyek**. Kontrak antarmodul sudah dibekukan dan
+> modul coordinator berjalan, tetapi `core/` dan lapisan gRPC masih placeholder
+> milik anggota A dan B. Jaringan belum menambang blok.
+
+## Prasyarat
+
+- Python 3.11 atau 3.12
+- Docker Desktop dengan Docker Compose v2
+- Windows PowerShell (contoh di bawah) atau shell POSIX
+
+## Dependensi
+
+| Paket | Dipakai untuk |
+|---|---|
+| Flask | REST per node dan dashboard coordinator |
+| grpcio, grpcio-tools, protobuf | komunikasi antarnode |
+| PyYAML | `config/settings.yaml` |
+| pytest, ruff | pengujian dan kualitas kode |
+| pandas, matplotlib | analisis dan grafik di `experiments/` |
+
+Versi di `requirements.txt` masih rentang; pin dengan `pip freeze` setelah
+instalasi pertama berhasil.
+
+## Instalasi lokal
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -e .
+```
+
+## Menjalankan jaringan
+
+```powershell
+docker compose up --build -d
+docker compose ps
+```
+
+Jaringan default: 1 coordinator + 6 node pada network `chainnet`. Setiap node
+punya volume sendiri (`node-N-data`) sehingga rantai bertahan setelah restart.
+Port node hanya ada di dalam network; host hanya membuka dashboard.
+
+```powershell
+docker compose logs -f coordinator
+docker compose down            # tambah -v hanya jika ingin menghapus volume rantai
+```
+
+## Dashboard
+
+<http://127.0.0.1:8080>
+
+| Endpoint | Isi |
+|---|---|
+| `GET /` | tabel status node dan kejadian terakhir |
+| `GET /api/nodes` | status semua node dalam JSON |
+| `GET /api/events?limit=50` | kejadian terbaru dari `logs/*.jsonl` |
+| `GET /metrics` | metrik format Prometheus |
+
+Dashboard hanya menampilkan data yang benar-benar dibaca dari node. Node yang
+tidak terjangkau ditandai `down` dan metriknya dikosongkan, bukan diisi angka
+contoh.
+
+## Transaksi dan injeksi kegagalan
+
+```powershell
+python scripts/tx_generator.py --rate 5 --duration 60
+python scripts/fault_inject.py stop --service node-3
+python scripts/fault_inject.py start --service node-3
+python scripts/fault_inject.py remove-volume --service node-3
+python scripts/fault_inject.py --dry-run disconnect --service node-3
+```
+
+Setiap aksi injeksi dicatat sebagai event `fault_injected` di
+`logs/fault_injector.jsonl` agar waktu deteksi dan pemulihan bisa dihitung.
+
+## Eksperimen
+
+```powershell
+python experiments/e3_fault.py --dry-run
+python experiments/e4_scalability.py --dry-run
+python experiments/plot.py
+```
+
+Hasil ringkas disimpan di `experiments/results/*.csv` dan grafiknya `*.png`.
+Belum ada hasil eksperimen yang dijalankan; angka di laporan nanti hanya boleh
+berasal dari folder itu.
+
+## Struktur repo
+
+```
+config/settings.yaml          konfigurasi tunggal (difficulty, port, timeout)
+proto/                        kontrak protobuf (anggota B)
+src/chainsim/types.py         dataclass kontrak antarmodul
+src/chainsim/core/            transaksi, blok, PoW, rantai, mempool, storage (A)
+src/chainsim/node/            REST, miner, gRPC, gossip, sync (A dan B)
+src/chainsim/coordinator/     registry, heartbeat, scheduler, metrik, dashboard (C)
+docker/                       Dockerfile node dan coordinator
+docker-compose.yml            1 coordinator + 6 node
+scripts/                      pembangkit transaksi, injeksi kegagalan, generate proto
+experiments/                  skrip E1-E4, metrik, grafik, hasil
+tests/                        unit test
+logs/                         log JSONL runtime (tidak di-commit)
+evidence/                     tangkapan layar dan potongan log untuk laporan
+docs/                         arsitektur, keputusan, lingkungan lab, draf laporan
+```
+
+## Konfigurasi
+
+Semua angka ada di `config/settings.yaml` dan dapat ditimpa environment
+(`DIFFICULTY`, `MINING_MODE`, `NODE_REST_PORT`, `NODE_GRPC_PORT`, `PEERS`,
+`NODES`, `HEARTBEAT_INTERVAL_S`, `LOG_DIR`, dan seterusnya). Salin
+`.env.example` menjadi `.env` untuk pengaturan lokal; `.env` tidak di-commit.
+
+## Pengujian
+
+```powershell
+ruff check .
+ruff format --check .
+pytest
+pytest -m integration         # butuh Docker berjalan
+```
+
+## Keamanan
+
+- Hanya dashboard yang dipublikasikan, dan hanya ke `127.0.0.1`.
+- Flask berjalan dengan `debug=False` di dalam container.
+- Tidak ada kredensial, dompet nyata, atau koneksi ke jaringan blockchain publik.
+- Input `POST /tx` wajib divalidasi di sisi server (Bagian 10).
+
+## Dokumen terkait
+
+- `docs/architecture.md` - komponen, topologi, alur konsensus
+- `docs/decisions.md` - keputusan teknis dan pertanyaan terbuka
+- `docs/lab-environment.md` - spesifikasi mesin eksperimen final
+- `docs/video-script.md` - rencana video demo

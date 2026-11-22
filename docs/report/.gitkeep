@@ -1,0 +1,17 @@
+# Draf laporan per bab
+
+Folder ini menampung draf Markdown per bab sebelum digabung ke format IEEE.
+Pembagian (AGENTS.md Bagian 11):
+
+| Bab | Penulis | File yang disarankan |
+|---|---|---|
+| Pendahuluan | bersama | `01-pendahuluan.md` |
+| Kajian Teori | A | `02-kajian-teori.md` |
+| Metodologi dan Arsitektur | B | `03-metodologi.md` |
+| Implementasi | C | `04-implementasi.md` |
+| Pengujian dan Analisis Performansi | A (E1), B (E2), C (E3, E4) | `05-pengujian.md` |
+| Kesimpulan dan Saran | bersama | `06-kesimpulan.md` |
+
+Referensi hanya dari sumber yang benar-benar dibaca anggota tim (Mendeley atau
+Zotero). Angka di bab pengujian hanya boleh berasal dari
+`experiments/results/`.

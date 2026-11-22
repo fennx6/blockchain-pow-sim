@@ -1,0 +1,128 @@
+# Jaringan default: 1 coordinator + 6 node (spesifikasi minimal Tema 4).
+# Setiap node punya volume sendiri sehingga bisa melanjutkan rantai setelah
+# restart (skenario F2/F3). Port node hanya ada di network internal; host hanya
+# membuka dashboard coordinator di 127.0.0.1:8080 (AGENTS.md Bagian 10).
+
+name: chainsim
+
+x-node-build: &node-build
+  context: .
+  dockerfile: docker/Dockerfile.node
+
+x-node-env: &node-env
+  NODE_REST_PORT: "8081"
+  NODE_GRPC_PORT: "50051"
+  LOG_DIR: /app/logs
+  LOG_LEVEL: "INFO"
+  DIFFICULTY: "${DIFFICULTY:-4}"
+  MINING_MODE: "${MINING_MODE:-compete}"
+  BLOCK_SIZE: "${BLOCK_SIZE:-50}"
+  CONFIRMATIONS: "${CONFIRMATIONS:-3}"
+  COORDINATOR_URL: "http://coordinator:8080"
+
+x-node-base: &node-base
+  build: *node-build
+  image: chainsim-node:dev
+  depends_on:
+    coordinator:
+      condition: service_started
+  networks:
+    - chainnet
+  cpus: "1.0"
+  restart: unless-stopped
+
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.coordinator
+    image: chainsim-coordinator:dev
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      COORDINATOR_HOST: "0.0.0.0"
+      COORDINATOR_PORT: "8080"
+      LOG_DIR: /app/logs
+      LOG_LEVEL: "INFO"
+      HEARTBEAT_INTERVAL_S: "${HEARTBEAT_INTERVAL_S:-2}"
+      HEARTBEAT_TIMEOUT_S: "${HEARTBEAT_TIMEOUT_S:-1}"
+      NODES: >-
+        node-1=node-1:8081,node-2=node-2:8081,node-3=node-3:8081,
+        node-4=node-4:8081,node-5=node-5:8081,node-6=node-6:8081
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - chainnet
+    restart: unless-stopped
+
+  node-1:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      NODE_ID: "node-1"
+      PEERS: "node-2,node-3,node-4,node-5,node-6"
+    volumes:
+      - ./logs:/app/logs
+      - node-1-data:/app/data
+
+  node-2:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      NODE_ID: "node-2"
+      PEERS: "node-1,node-3,node-4,node-5,node-6"
+    volumes:
+      - ./logs:/app/logs
+      - node-2-data:/app/data
+
+  node-3:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      NODE_ID: "node-3"
+      PEERS: "node-1,node-2,node-4,node-5,node-6"
+    volumes:
+      - ./logs:/app/logs
+      - node-3-data:/app/data
+
+  node-4:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      NODE_ID: "node-4"
+      PEERS: "node-1,node-2,node-3,node-5,node-6"
+    volumes:
+      - ./logs:/app/logs
+      - node-4-data:/app/data
+
+  node-5:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      NODE_ID: "node-5"
+      PEERS: "node-1,node-2,node-3,node-4,node-6"
+    volumes:
+      - ./logs:/app/logs
+      - node-5-data:/app/data
+
+  node-6:
+    <<: *node-base
+    environment:
+      <<: *node-env
+      NODE_ID: "node-6"
+      PEERS: "node-1,node-2,node-3,node-4,node-5"
+    volumes:
+      - ./logs:/app/logs
+      - node-6-data:/app/data
+
+networks:
+  chainnet:
+    driver: bridge
+
+volumes:
+  node-1-data:
+  node-2-data:
+  node-3-data:
+  node-4-data:
+  node-5-data:
+  node-6-data:

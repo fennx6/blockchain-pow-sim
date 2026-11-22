@@ -1,0 +1,2 @@
+# Log runtime (JSONL) ditulis di sini saat node/coordinator berjalan.
+# File *.jsonl tidak di-commit; folder ini dipertahankan lewat .gitkeep.

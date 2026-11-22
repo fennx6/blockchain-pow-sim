@@ -1,0 +1,43 @@
+# --- Secret dan konfigurasi lokal -------------------------------------------------
+.env
+*.pem
+
+# AGENTS.md hanya untuk mesin lokal; tidak pernah di-commit atau di-push.
+AGENTS.md
+
+# --- Virtual environment ----------------------------------------------------------
+.venv/
+.venv*/
+venv/
+
+# --- Artefak Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Cache tool -------------------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Data runtime (volume container tetap di Docker, bukan di Git) ----------------
+data/
+logs/*.jsonl
+logs/*.log
+logs/*.out
+logs/*.err
+
+# --- Kode hasil generate gRPC (dibuat oleh scripts/gen_proto.*) --------------------
+src/chainsim/generated/*_pb2.py
+src/chainsim/generated/*_pb2.pyi
+src/chainsim/generated/*_pb2_grpc.py
+
+# --- Hasil eksperimen yang tidak boleh di-commit -----------------------------------
+experiments/results/*.jsonl
+experiments/.generated/
+
+# --- Override compose lokal --------------------------------------------------------
+docker-compose.override.yml
