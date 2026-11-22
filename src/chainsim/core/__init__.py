@@ -11,6 +11,8 @@ from chainsim.core.block import (
     compute_merkle_root,
     create_genesis_block,
 )
+from chainsim.core.chain import Blockchain, block_work, chain_work
+from chainsim.core.mempool import Mempool
 from chainsim.core.pow import is_valid_pow, mine, mine_with_stats
 from chainsim.core.storage import load_chain, save_chain
 from chainsim.core.transaction import (
@@ -23,12 +25,16 @@ from chainsim.core.transaction import (
 )
 
 __all__ = [
+    "Blockchain",
     "GENESIS_MINER_ID",
     "GENESIS_PREV_HASH",
     "GENESIS_TIMESTAMP_MS",
+    "Mempool",
     "block_from_dict",
     "block_to_dict",
+    "block_work",
     "build_block_template",
+    "chain_work",
     "compute_hash",
     "compute_merkle_root",
     "compute_tx_id",
