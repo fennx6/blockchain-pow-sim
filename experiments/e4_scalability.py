@@ -16,6 +16,7 @@ _EXPERIMENTS_DIR = Path(__file__).resolve().parent
 if str(_EXPERIMENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_EXPERIMENTS_DIR))
 
+from compose_gen import GENERATED_DIR, ComposeSpec, build_compose  # noqa: E402
 from runner import DEFAULT_COMPOSE_FILE, RESULTS_DIR  # noqa: E402
 
 logger = logging.getLogger("e4_scalability")
@@ -47,12 +48,23 @@ def main(argv: list[str] | None = None) -> int:
         args.trials,
     )
     for count in NODE_COUNTS:
-        logger.info("  n_nodes=%d metrik=%s", count, ",".join(METRICS))
-    logger.info("  compose: %s", args.compose_file)
+        try:
+            data = build_compose(ComposeSpec(n_nodes=count, template=args.compose_file))
+        except (OSError, ValueError) as exc:
+            logger.error("gagal membangkitkan compose untuk %d node: %s", count, exc)
+            return 2
+        logger.info(
+            "  n_nodes=%d worker=%d metrik=%s output=%s",
+            count,
+            len(data["services"]) - 1,
+            ",".join(METRICS),
+            GENERATED_DIR / f"docker-compose.n{count}.yml",
+        )
+    logger.info("  template compose: %s", args.compose_file)
     logger.info("  keluaran: %s", RESULT_FILE)
     logger.info(
-        "  catatan: compose default memakai 6 service bernama; jumlah node lain "
-        "dibangkitkan dari template agar volume per node tetap unik"
+        "  catatan: compose per konfigurasi dibangkitkan oleh experiments/compose_gen.py "
+        "(docs/decisions.md D3)"
     )
 
     if args.dry_run:

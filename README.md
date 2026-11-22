@@ -85,8 +85,13 @@ Setiap aksi injeksi dicatat sebagai event `fault_injected` di
 ```powershell
 python experiments/e3_fault.py --dry-run
 python experiments/e4_scalability.py --dry-run
+python experiments/compose_gen.py --nodes 16 --mode pool
 python experiments/plot.py
 ```
+
+`compose_gen.py` menurunkan file compose untuk N node (2/4/8/16) dari
+`docker-compose.yml` ke `experiments/.generated/` (tidak di-commit), sehingga
+setiap node tetap punya nama dan volume sendiri.
 
 Hasil ringkas disimpan di `experiments/results/*.csv` dan grafiknya `*.png`.
 Belum ada hasil eksperimen yang dijalankan; angka di laporan nanti hanya boleh
