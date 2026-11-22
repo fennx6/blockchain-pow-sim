@@ -60,6 +60,34 @@ File tetap ada di mesin lokal sebagai panduan kerja.
 Node: REST `8081` dan gRPC `50051` di dalam network `chainnet`, tidak
 dipublikasikan. Coordinator: `8080` dipublikasikan hanya ke `127.0.0.1`.
 
+### D9. Manajemen job mode pool ada di `coordinator/scheduler.py`
+
+`PoolJobManager` membagi satu ruang nonce ke worker, memvalidasi bahwa nonce
+yang dilaporkan memang berada di rentang worker tersebut, menetapkan pemenang,
+dan membagikan ulang rentang worker yang mati (`reassign`). Ini yang diukur
+sebagai waktu reassignment pada F1.
+
+Event tambahan di luar daftar baku Bagian 9.2: `job_reassigned` dan
+`job_finished`. Keduanya diperlukan untuk menghitung waktu pemulihan dari log;
+daftar baku tidak memuat event reassignment.
+
+### D10. Transport gRPC coordinator menunggu proto milik B
+
+Logika coordinator (registry, heartbeat, penjadwalan job pool, pengumpulan
+metrik) sudah terpisah dari transport. Server `CoordinatorService`
+(Register/Heartbeat/SubmitWorkResult/GetPeers) belum ditulis karena
+`proto/blockchain.proto` belum ada; menulis adapter protobuf sekarang berarti
+menebak nama message milik B. Setelah proto disepakati, adapter cukup memanggil
+`NodeRegistry` dan `PoolJobManager` yang sudah ada.
+
+### D11. Generator compose untuk E4
+
+`experiments/compose_gen.py` menurunkan compose N node dari template
+`docker-compose.yml` sehingga image, environment, `cpus`, dan port dashboard
+tetap sama dengan konfigurasi default, sementara setiap node mendapat nama dan
+volume sendiri. Hasil generate ditulis ke `experiments/.generated/` (di-ignore
+Git) agar tidak mengotori repo.
+
 ## Daftar tugas per anggota setelah Fase 0
 
 - **A:** `core/*`, `node/api.py`, `node/miner.py`, `experiments/e1_speedup.py`;
@@ -68,9 +96,11 @@ dipublikasikan. Coordinator: `8080` dipublikasikan hanya ke `127.0.0.1`.
   `grpc_server.py`, `grpc_client.py`, `gossip.py`, `sync.py`,
   `scripts/tx_generator.py`, `experiments/e2_propagation.py`; menambah
   `CoordinatorService` di sisi server.
-- **C:** melengkapi orkestrasi `experiments/e3_fault.py` dan
-  `experiments/e4_scalability.py`, kalibrasi difficulty, `docs/lab-environment.md`,
-  serta dashboard bila data dari node sudah tersedia.
+- **C:** sudah selesai - coordinator, dashboard, logging, Docker, compose,
+  generator compose E4, `PoolJobManager`, fault injector, helper metrik/grafik.
+  Belum: orkestrasi `e3_fault.py` dan `e4_scalability.py` (butuh Docker + node
+  berjalan), kalibrasi difficulty, isi `docs/lab-environment.md`, adapter gRPC
+  coordinator setelah proto B ada.
 
 ## Pertanyaan terbuka
 
