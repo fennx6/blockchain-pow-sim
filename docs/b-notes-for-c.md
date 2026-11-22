@@ -33,3 +33,20 @@ root repo dari lokasi file (`/app`), sehingga default `proto/` dan
 **Untuk pengembangan lokal.** Setiap anggota menjalankan
 `.\scripts\gen_proto.ps1` (Windows) atau `./scripts/gen_proto.sh` (POSIX)
 sebelum `pytest`, karena file hasil generate tidak di-commit.
+
+## Fitur 5 (rencana): CoordinatorService dan mode pool
+
+Proto sudah memuat `CoordinatorService.SubmitTemplate` (lihat komentar D13 di
+`proto/blockchain.proto`). Agar fitur ini bisa dijalankan, C perlu menyiapkan:
+
+1. **Port gRPC coordinator** (usul `50052`) di `docker-compose.yml` dan
+   `docker/Dockerfile.coordinator`, plus env `COORDINATOR_GRPC_PORT=50052` dan
+   `COORDINATOR_GRPC=coordinator:50052` untuk node.
+2. **`coordinator/main.py`** menjalankan server gRPC `CoordinatorService`
+   (adapter B) di port tersebut.
+3. **Alur pool**: node mengirim `SubmitTemplate` berisi template blok; adapter
+   memanggil `PoolJobManager.start_job`, lalu coordinator memanggil
+   `NodeService.StartWork` ke semua worker dan `StopWork` saat pemenang sudah
+   ada.
+4. **`docs/decisions.md`** perlu entri D13 untuk keputusan `SubmitTemplate` dan
+   D14 untuk join log E2 (`block_mined` ↔ `block_received` lewat `block_hash`).
