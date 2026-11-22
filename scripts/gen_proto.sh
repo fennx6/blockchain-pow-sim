@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Placeholder milik anggota B (AGENTS.md Bagian 3).
-# Tugas: generate src/chainsim/generated/*_pb2*.py dari proto/blockchain.proto
-# memakai grpc_tools.protoc, lalu hapus cache agar import bersih.
-echo "TODO(B): implementasi generate gRPC dari proto/blockchain.proto" >&2
-exit 1
+# Generate src/chainsim/generated/*_pb2*.py from proto/blockchain.proto.
+# Pemilik: anggota B. Logika ada di scripts/gen_proto.py agar sama dengan
+# versi PowerShell dan bisa diuji tanpa bergantung pada shell tertentu.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="${PYTHON:-python}"
+exec "$PYTHON" "$SCRIPT_DIR/gen_proto.py" "$@"

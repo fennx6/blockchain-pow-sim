@@ -1,0 +1,124 @@
+// Kontrak gRPC antarnode dan node-coordinator (AGENTS.md Bagian 6.3).
+// Pemilik: anggota B. Perubahan kontrak membutuhkan persetujuan ketiga anggota.
+//
+// Catatan desain:
+// - ``nonce`` dan ``timestamp_ms`` memakai int64 karena ruang nonce dapat
+//   melebihi 2^31 dan timestamp dalam milidetik tidak muat di int32.
+// - ``SubmitTemplate`` ditambahkan untuk mode pool: node mengirim template blok,
+//   coordinator membagi rentang nonce lalu memanggil ``StartWork`` ke worker.
+//   Keputusan ini dicatat di docs/decisions.md (D13).
+
+syntax = "proto3";
+
+package chainsim;
+
+message TransactionMsg {
+  string tx_id = 1;
+  string sender = 2;
+  string receiver = 3;
+  double amount = 4;
+  int64 timestamp_ms = 5;
+  string origin_node = 6;
+}
+
+message BlockMsg {
+  int32 index = 1;
+  string prev_hash = 2;
+  int64 timestamp_ms = 3;
+  repeated TransactionMsg transactions = 4;
+  string merkle_root = 5;
+  int32 difficulty = 6;
+  int64 nonce = 7;
+  string miner_id = 8;
+  string hash = 9;
+}
+
+message Ack {
+  bool ok = 1;
+  string message = 2;
+}
+
+message Empty {}
+
+message BlockRange {
+  int32 from_index = 1;
+}
+
+message NodeStatusMsg {
+  string node_id = 1;
+  int32 height = 2;
+  string tip_hash = 3;
+  repeated string peers = 4;
+  int32 mempool_size = 5;
+  double hashrate = 6;
+  string state = 7;
+  map<string, string> meta = 8;
+}
+
+message WorkAssignmentMsg {
+  string job_id = 1;
+  BlockMsg block_template = 2;
+  int64 nonce_start = 3;
+  int64 nonce_end = 4;
+}
+
+message JobRef {
+  string job_id = 1;
+}
+
+message NodeInfo {
+  string node_id = 1;
+  string rest_url = 2;
+  string grpc_address = 3;
+  repeated string peers = 4;
+}
+
+message PeerList {
+  repeated NodeInfo nodes = 1;
+}
+
+message HeartbeatMsg {
+  string node_id = 1;
+  NodeStatusMsg status = 2;
+}
+
+message HeartbeatReply {
+  bool ok = 1;
+  repeated NodeInfo peers = 2;
+}
+
+message WorkResultMsg {
+  string job_id = 1;
+  string node_id = 2;
+  int64 nonce = 3;
+  bool found = 4;
+  string block_hash = 5;
+}
+
+message TemplateMsg {
+  string node_id = 1;
+  BlockMsg block_template = 2;
+}
+
+message JobStartedMsg {
+  bool accepted = 1;
+  string job_id = 2;
+  string message = 3;
+}
+
+service NodeService {
+  rpc SubmitTransaction(TransactionMsg) returns (Ack);
+  rpc AnnounceBlock(BlockMsg) returns (Ack);
+  rpc GetBlocks(BlockRange) returns (stream BlockMsg);
+  rpc GetStatus(Empty) returns (NodeStatusMsg);
+  rpc StartWork(WorkAssignmentMsg) returns (Ack);
+  rpc StopWork(JobRef) returns (Ack);
+}
+
+service CoordinatorService {
+  rpc Register(NodeInfo) returns (PeerList);
+  rpc Heartbeat(HeartbeatMsg) returns (HeartbeatReply);
+  rpc SubmitWorkResult(WorkResultMsg) returns (Ack);
+  rpc GetPeers(Empty) returns (PeerList);
+  rpc SubmitTemplate(TemplateMsg) returns (JobStartedMsg);
+}
