@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1] / "experiments"
-if str(EXPERIMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(EXPERIMENTS_DIR))
-
-import e2_propagation  # noqa: E402
-from metrics import read_results  # noqa: E402
+from experiments import e2_propagation
+from experiments.metrics import read_results
 
 
 def _write_log(path: Path, events: list[dict]) -> None:
