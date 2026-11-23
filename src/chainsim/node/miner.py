@@ -29,6 +29,7 @@ WorkResultCallback = Callable[[WorkAssignment, Block | None], None]
 
 DEFAULT_BATCH_SIZE = 50_000
 DEFAULT_IDLE_POLL_S = 0.05
+MAX_CANCELLED_JOBS = 1_024
 
 
 class Miner:
@@ -83,7 +84,7 @@ class Miner:
 
         self._work_queue: queue.Queue[WorkAssignment] = queue.Queue()
         self._active_job_id: str | None = None
-        self._cancelled_jobs: set[str] = set()
+        self._cancelled_jobs: dict[str, None] = {}
 
     @property
     def mode(self) -> str:
@@ -151,9 +152,20 @@ class Miner:
     def stop_work(self, job_id: str) -> None:
         """Cancel an active or queued pool job matching ``job_id``."""
         with self._lock:
-            self._cancelled_jobs.add(job_id)
+            self._cancelled_jobs[job_id] = None
+            if len(self._cancelled_jobs) > MAX_CANCELLED_JOBS:
+                oldest = next(iter(self._cancelled_jobs))
+                del self._cancelled_jobs[oldest]
             if self._active_job_id == job_id:
                 self._round_stop.set()
+
+    def _is_pool_block_stale(self, block: Block) -> bool:
+        """Return True if ``block`` can no longer advance the active chain."""
+        if block.index <= self._chain.height():
+            return True
+        if self._chain.get_block(block.hash) is not None:
+            return True
+        return self._chain.get_block(block.prev_hash) is None
 
     def _set_idle(self) -> None:
         with self._lock:
@@ -199,6 +211,12 @@ class Miner:
                 self._shutdown.wait(self._idle_poll_s)
                 continue
 
+            with self._lock:
+                if self._shutdown.is_set():
+                    break
+                round_stop = threading.Event()
+                self._round_stop = round_stop
+
             tip = self._chain.tip()
             # Filter out any tx already confirmed on the active chain in case of races.
             eligible_txs = [tx for tx in txs if not self._chain.has_transaction(tx.tx_id)]
@@ -209,12 +227,8 @@ class Miner:
                 difficulty=self._chain.difficulty,
                 miner_id=self._node_id,
             )
-
-            with self._lock:
-                round_stop = threading.Event()
-                self._round_stop = round_stop
-                if self._shutdown.is_set():
-                    break
+            if round_stop.is_set() or self._shutdown.is_set():
+                continue
 
             mined = self._mine_batched(template, 0, self._nonce_space, round_stop)
             if mined is None or self._shutdown.is_set():
@@ -266,10 +280,24 @@ class Miner:
                 with self._lock:
                     self._active_job_id = None
 
-            if cancelled and mined is None:
+            if self._shutdown.is_set():
+                break
+
+            with self._lock:
+                job_cancelled = assignment.job_id in self._cancelled_jobs
+
+            if job_cancelled or (cancelled and mined is None):
                 continue
 
             if mined is not None:
+                if self._is_pool_block_stale(mined):
+                    logger.debug(
+                        "skipping stale pool block %s at index %d (chain height %d)",
+                        mined.hash,
+                        mined.index,
+                        self._chain.height(),
+                    )
+                    continue
                 log_event(
                     "block_mined",
                     self._node_id,

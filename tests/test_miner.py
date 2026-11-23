@@ -14,7 +14,7 @@ from chainsim.core.chain import Blockchain
 from chainsim.core.mempool import Mempool
 from chainsim.core.pow import is_valid_pow, mine
 from chainsim.core.transaction import create_transaction
-from chainsim.node.miner import Miner
+from chainsim.node.miner import MAX_CANCELLED_JOBS, Miner
 from chainsim.types import AddResult, Block, WorkAssignment
 
 
@@ -224,3 +224,68 @@ def test_miner_validation_and_mode_guards() -> None:
     solved = mine(tpl, 0, 10_000, threading.Event())
     assert solved is not None
     assert chain.add_block(solved) is AddResult.ACCEPTED
+
+
+def test_pool_miner_skips_stale_block_without_logging_block_mined(log_dir_env: Path) -> None:
+    pool = Mempool()
+    chain = Blockchain(difficulty=1, mempool=pool, node_id="node-4")
+    genesis = chain.tip()
+
+    # Advance chain to height 1 before the stale height-1 pool assignment finishes.
+    b1 = mine(
+        build_block_template(1, genesis.hash, [], difficulty=1, miner_id="node-1", timestamp_ms=10),
+        0,
+        100_000,
+        threading.Event(),
+    )
+    assert b1 is not None
+    assert chain.add_block(b1) is AddResult.ACCEPTED
+
+    stale_template = build_block_template(
+        index=1,
+        prev_hash=genesis.hash,
+        transactions=[],
+        difficulty=1,
+        miner_id="node-4",
+        timestamp_ms=20,
+    )
+    results: list[tuple[WorkAssignment, Block | None]] = []
+    miner = Miner(
+        node_id="node-4",
+        chain=chain,
+        mempool=pool,
+        mode="pool",
+        block_size=10,
+        nonce_space=100_000,
+        on_work_result=lambda a, b: results.append((a, b)),
+        idle_poll_s=0.01,
+    )
+    miner.start()
+    try:
+        miner.submit_work(WorkAssignment("job-stale", stale_template, 0, 100_000))
+        assert _wait_until(lambda: miner._work_queue.empty() and miner.state() == "idle")
+    finally:
+        miner.stop()
+
+    assert results == []
+    log_file = log_dir_env / "node-4.jsonl"
+    events = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
+    assert not any(ev["event"] == "block_mined" for ev in events)
+
+
+def test_pool_miner_bounds_cancelled_jobs_cache() -> None:
+    chain = Blockchain(difficulty=1)
+    pool = Mempool()
+    miner = Miner(
+        node_id="node-5",
+        chain=chain,
+        mempool=pool,
+        mode="pool",
+        block_size=10,
+        nonce_space=100,
+    )
+    for idx in range(MAX_CANCELLED_JOBS + 50):
+        miner.stop_work(f"job-{idx}")
+    assert len(miner._cancelled_jobs) == MAX_CANCELLED_JOBS
+    assert f"job-{MAX_CANCELLED_JOBS + 49}" in miner._cancelled_jobs
+    assert "job-0" not in miner._cancelled_jobs
