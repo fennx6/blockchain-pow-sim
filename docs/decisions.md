@@ -88,6 +88,46 @@ tetap sama dengan konfigurasi default, sementara setiap node mendapat nama dan
 volume sendiri. Hasil generate ditulis ke `experiments/.generated/` (di-ignore
 Git) agar tidak mengotori repo.
 
+### D12. Adapter gRPC coordinator dan port 50052
+
+`src/chainsim/coordinator/grpc_server.py` mengimplementasikan
+`CoordinatorService` (Register, Heartbeat, GetPeers, SubmitWorkResult,
+SubmitTemplate) di atas `NodeRegistry` dan `PoolJobManager`. Server dijalankan
+dari `coordinator/main.py` bersama Flask.
+
+Port gRPC coordinator dibaca dari `COORDINATOR_GRPC_PORT` dengan default 50052
+lewat `grpc_server.grpc_port_from_env`, bukan dari `config/settings.yaml`,
+karena file itu milik bersama dan penambahannya butuh PR terpisah. Node
+mendapat alamat coordinator dari `COORDINATOR_GRPC` (mis.
+`coordinator:50052`); kedua variabel itu belum ditambahkan ke
+`docker-compose.yml` (tugas Docker terpisah).
+
+`heartbeat.on_down` sekarang memanggil `PoolJobManager.reassign_grouped` lalu
+`CoordinatorService.dispatch`, sehingga waktu reassignment F1 benar-benar
+diukur dari `job_reassigned` ke `StartWork` worker yang hidup.
+
+### D13. `SubmitTemplate` untuk memulai job pool
+
+Mode `pool` tidak memakai miner mandiri: node membangun template dari tip
+lokal, mengirim `SubmitTemplate` ke coordinator, lalu menunggu `StartWork`.
+Coordinator membagi ruang nonce ke semua worker terdaftar dan menghentikan
+worker lain saat pemenang melapor. Validitas blok tetap di node. Pemanggil
+`SubmitTemplate` ada di `node/main.py` (milik B), jadi sampai itu ditambahkan
+job pool tidak pernah dimulai; lihat `docs/c-notes-for-b.md`.
+
+### D14. Orkestrasi E3/E4 dan baseline scalability
+
+`experiments/e3_fault.py` menjalankan `scripts/fault_inject.py` lalu menghitung
+metrik dari `logs/*.jsonl` di dalam jendela waktu aksi. Metrik yang tidak
+muncul di log tidak ditulis; skrip keluar dengan kode 2 agar kegagalan terlihat.
+
+`experiments/e4_scalability.py` membangkitkan compose per N (D3), menjalankan
+beban transaksi di dalam network, dan memakai jendela pengamatan yang sama
+untuk throughput serta delay propagasi. Baseline 1 node dijalankan pada trial
+yang sama agar `efficiency = (throughput_N / throughput_1) / N` memakai
+pembanding setara. Mode default E4 adalah `compete` sampai pemicu job pool ada
+(D13).
+
 ## Daftar tugas per anggota setelah Fase 0
 
 - **A:** `core/*`, `node/api.py`, `node/miner.py`, `experiments/e1_speedup.py`;
