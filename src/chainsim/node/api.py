@@ -31,11 +31,27 @@ from chainsim.types import NodeStatus, Transaction
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TX_AMOUNT = 1_000_000_000.0
+DEFAULT_MAX_CONTENT_LENGTH = 64 * 1024
 
 PeersProvider = Sequence[str] | Callable[[], Sequence[str]]
 TxForwardCallback = Callable[[Transaction], Any]
 StateProvider = Callable[[], str]
 MetaProvider = Callable[[], dict[str, Any]]
+
+
+def _was_forwarded(result: Any) -> bool:
+    """Interpret the return value of ``on_tx_received`` as a forwarding status."""
+    if result is None:
+        return True
+    if isinstance(result, bool):
+        return result
+    if isinstance(result, Sequence) and not isinstance(result, str | bytes):
+        if not result:
+            return False
+        if all(hasattr(item, "ok") for item in result):
+            return any(bool(item.ok) for item in result)
+        return True
+    return bool(result)
 
 
 def _resolve_peers(peers_provider: PeersProvider) -> list[str]:
@@ -64,16 +80,26 @@ def create_app(
     state_provider: StateProvider | None = None,
     meta_provider: MetaProvider | None = None,
     max_tx_amount: float = DEFAULT_MAX_TX_AMOUNT,
+    max_content_length: int = DEFAULT_MAX_CONTENT_LENGTH,
 ) -> Flask:
     """Build the node Flask REST application without starting a network server."""
     if not isinstance(node_id, str) or not node_id.strip():
         raise ValueError("node_id must be a non-empty string")
     if max_tx_amount <= 0:
         raise ValueError(f"max_tx_amount must be > 0, got {max_tx_amount!r}")
+    if isinstance(max_content_length, bool) or not isinstance(max_content_length, int):
+        raise ValueError(f"max_content_length must be an integer >= 1, got {max_content_length!r}")
+    if max_content_length < 1:
+        raise ValueError(f"max_content_length must be >= 1, got {max_content_length!r}")
 
     clean_node_id = node_id.strip()
     app = Flask(__name__)
     app.config["JSON_SORT_KEYS"] = False
+    app.config["MAX_CONTENT_LENGTH"] = max_content_length
+
+    @app.errorhandler(413)
+    def payload_too_large(_: Exception) -> tuple[Response, int]:
+        return jsonify({"error": "request body exceeds maximum allowed size"}), 413
 
     @app.post("/tx")
     def post_tx() -> tuple[Response, int]:
@@ -137,8 +163,8 @@ def create_app(
         forwarded = False
         if on_tx_received is not None:
             try:
-                on_tx_received(tx)
-                forwarded = True
+                forward_result = on_tx_received(tx)
+                forwarded = _was_forwarded(forward_result)
             except Exception:
                 logger.exception("failed to forward tx %s to peers", tx.tx_id)
 

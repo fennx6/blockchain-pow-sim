@@ -11,6 +11,7 @@ seed-generated block payloads, then records ``mining_time_s``, ``speedup``,
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import multiprocessing as mp
 import random
@@ -25,9 +26,12 @@ from typing import Any
 _EXPERIMENTS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _EXPERIMENTS_DIR.parent
 _SRC_DIR = _REPO_ROOT / "src"
-for _path in (_EXPERIMENTS_DIR, _SRC_DIR):
+for _path in (_REPO_ROOT, _EXPERIMENTS_DIR, _SRC_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
+
+from experiments.metrics import efficiency, speedup, throughput  # noqa: E402
+from experiments.runner import RESULTS_DIR, RunContext, new_run_id  # noqa: E402
 
 from chainsim.config import load_settings  # noqa: E402
 from chainsim.coordinator.scheduler import split_nonce_space  # noqa: E402
@@ -35,17 +39,16 @@ from chainsim.core.block import build_block_template, create_genesis_block  # no
 from chainsim.core.pow import is_valid_pow, mine_with_stats  # noqa: E402
 from chainsim.core.transaction import create_transaction  # noqa: E402
 from chainsim.types import Block, Transaction  # noqa: E402
-from metrics import efficiency, speedup, throughput  # noqa: E402
-from runner import RESULTS_DIR, RunContext, new_run_id  # noqa: E402
 
 logger = logging.getLogger("e1_speedup")
 
 EXPERIMENT_NAME = "e1_speedup"
 DEFAULT_WORKERS = (1, 2, 4, 6)
-DEFAULT_BLOCKS_PER_TRIAL = 5
+DEFAULT_BLOCKS_PER_TRIAL = 10
 DEFAULT_TRIALS = 5
 DEFAULT_TX_PER_BLOCK = 10
 DEFAULT_SEED = 42
+WORKER_READY_TIMEOUT_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -108,12 +111,50 @@ def generate_block_transactions(
     return txs
 
 
+def build_trial_templates(
+    *,
+    seed: int,
+    trial: int,
+    blocks_per_trial: int,
+    difficulty: int,
+    tx_per_block: int,
+) -> list[Block]:
+    """Build identical block templates for a trial across all worker counts."""
+    genesis = create_genesis_block(difficulty=difficulty)
+    templates: list[Block] = []
+    for block_idx in range(1, blocks_per_trial + 1):
+        txs = generate_block_transactions(
+            seed=seed,
+            trial=trial,
+            block_index=block_idx,
+            tx_count=tx_per_block,
+        )
+        prev_hash = (
+            genesis.hash
+            if block_idx == 1
+            else hashlib.sha256(f"{seed}:{trial}:{block_idx - 1}".encode()).hexdigest()
+        )
+        templates.append(
+            build_block_template(
+                index=block_idx,
+                prev_hash=prev_hash,
+                transactions=txs,
+                difficulty=difficulty,
+                miner_id="pool-worker",
+                timestamp_ms=1_700_000_000_000 + trial * 100_000 + block_idx * 1_000,
+            )
+        )
+    return templates
+
+
 def _worker_process(
     task_queue: Any,
     result_queue: Any,
     stop_event: Any,
+    ready_queue: Any,
 ) -> None:
     """Persistent pool worker process executing assigned nonce slices."""
+    ready_queue.put(True)
     while True:
         task = task_queue.get()
         if task is None:
@@ -133,11 +174,12 @@ class _WorkerPool:
         ctx = mp.get_context("spawn")
         self._stop_event = ctx.Event()
         self._result_queue = ctx.Queue()
+        self._ready_queue = ctx.Queue()
         self._task_queues = [ctx.Queue() for _ in range(n_workers)]
         self._processes = [
             ctx.Process(
                 target=_worker_process,
-                args=(task_q, self._result_queue, self._stop_event),
+                args=(task_q, self._result_queue, self._stop_event, self._ready_queue),
                 daemon=True,
             )
             for task_q in self._task_queues
@@ -146,6 +188,10 @@ class _WorkerPool:
     def __enter__(self) -> _WorkerPool:
         for proc in self._processes:
             proc.start()
+        # Wait until every spawned worker has finished importing and is ready to mine
+        # so process startup overhead is never included in Trial 1 timing.
+        for _ in range(self._n_workers):
+            self._ready_queue.get(timeout=WORKER_READY_TIMEOUT_S)
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -204,30 +250,20 @@ def run_trial(
     tx_per_block: int,
     seed: int,
 ) -> TrialMeasurement:
-    """Mine ``blocks_per_trial`` sequential blocks using ``pool`` and return timing stats."""
-    genesis = create_genesis_block(difficulty=difficulty)
-    prev_hash = genesis.hash
+    """Mine ``blocks_per_trial`` deterministic block templates and return timing stats."""
+    templates = build_trial_templates(
+        seed=seed,
+        trial=trial,
+        blocks_per_trial=blocks_per_trial,
+        difficulty=difficulty,
+        tx_per_block=tx_per_block,
+    )
     total_elapsed = 0.0
     total_hashes = 0
 
-    for block_idx in range(1, blocks_per_trial + 1):
-        txs = generate_block_transactions(
-            seed=seed,
-            trial=trial,
-            block_index=block_idx,
-            tx_count=tx_per_block,
-        )
-        template = build_block_template(
-            index=block_idx,
-            prev_hash=prev_hash,
-            transactions=txs,
-            difficulty=difficulty,
-            miner_id="pool-worker",
-            timestamp_ms=1_700_000_000_000 + trial * 100_000 + block_idx * 1_000,
-        )
+    for block_idx, template in enumerate(templates, start=1):
         round_id = trial * (blocks_per_trial + 1) + block_idx
-        mined, block_elapsed, block_hashes = pool.mine_block(round_id, template, nonce_space)
-        prev_hash = mined.hash
+        _, block_elapsed, block_hashes = pool.mine_block(round_id, template, nonce_space)
         total_elapsed += block_elapsed
         total_hashes += block_hashes
 
@@ -285,23 +321,18 @@ def run_experiment(
                 )
         measurements[workers] = per_worker
 
-    baseline_by_trial = {item.trial: item.elapsed_s for item in measurements[1]}
+    t_seq_mean = statistics.fmean(item.elapsed_s for item in measurements[1])
     written_rows: list[dict[str, Any]] = []
 
     for workers in ordered_workers:
-        speedups: list[float] = []
-        efficiencies: list[float] = []
         times: list[float] = []
 
         for item in measurements[workers]:
-            t_seq = baseline_by_trial[item.trial]
-            s_val = 1.0 if workers == 1 else speedup(t_seq, item.elapsed_s)
+            s_val = 1.0 if workers == 1 else speedup(t_seq_mean, item.elapsed_s)
             e_val = efficiency(s_val, workers)
             bps = throughput(item.blocks_mined, item.elapsed_s)
 
             times.append(item.elapsed_s)
-            speedups.append(s_val)
-            efficiencies.append(e_val)
 
             common = {
                 "n_nodes": workers,
@@ -320,18 +351,19 @@ def run_experiment(
                 ctx.record(metric="throughput_bps", value=bps, unit="blocks/s", **common)
             )
 
+        mean_time = statistics.fmean(times)
         t_std = statistics.stdev(times) if len(times) > 1 else 0.0
-        s_std = statistics.stdev(speedups) if len(speedups) > 1 else 0.0
-        e_std = statistics.stdev(efficiencies) if len(efficiencies) > 1 else 0.0
+        # Compute ratio-of-means speedup (T_seq_mean / T_par_mean) to avoid upward
+        # Jensen's inequality bias from averaging individual T_seq / T_par ratios.
+        mean_speedup = 1.0 if workers == 1 else speedup(t_seq_mean, mean_time)
+        mean_efficiency = efficiency(mean_speedup, workers)
         logger.info(
-            "summary workers=%d time=%.4f+/-%.4fs speedup=%.3f+/-%.3f efficiency=%.3f+/-%.3f",
+            "summary workers=%d time=%.4f+/-%.4fs speedup=%.3f efficiency=%.3f",
             workers,
-            statistics.fmean(times),
+            mean_time,
             t_std,
-            statistics.fmean(speedups),
-            s_std,
-            statistics.fmean(efficiencies),
-            e_std,
+            mean_speedup,
+            mean_efficiency,
         )
 
     return ctx.result_path(), written_rows

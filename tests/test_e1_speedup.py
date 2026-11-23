@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
-
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1] / "experiments"
-if str(EXPERIMENTS_DIR) not in sys.path:
-    sys.path.insert(0, str(EXPERIMENTS_DIR))
-
-import e1_speedup  # noqa: E402
-from metrics import RESULT_FIELDS, read_results  # noqa: E402
+from experiments import e1_speedup
+from experiments.metrics import RESULT_FIELDS, read_results
 
 
 def test_parse_worker_counts_sorts_deduplicates_and_requires_baseline() -> None:
@@ -86,3 +80,70 @@ def test_run_experiment_executes_real_mining_and_writes_valid_csv(tmp_path: Path
         metrics_by_worker[(2, "speedup")] / 2.0
     )
     assert metrics_by_worker[(2, "throughput_bps")] > 0.0
+
+
+def test_build_trial_templates_is_deterministic_across_worker_counts() -> None:
+    tpl_a = e1_speedup.build_trial_templates(
+        seed=42, trial=1, blocks_per_trial=3, difficulty=1, tx_per_block=4
+    )
+    tpl_b = e1_speedup.build_trial_templates(
+        seed=42, trial=1, blocks_per_trial=3, difficulty=1, tx_per_block=4
+    )
+    tpl_other = e1_speedup.build_trial_templates(
+        seed=42, trial=2, blocks_per_trial=3, difficulty=1, tx_per_block=4
+    )
+
+    assert tpl_a == tpl_b
+    assert len(tpl_a) == 3
+    assert [b.index for b in tpl_a] == [1, 2, 3]
+    assert tpl_a != tpl_other
+
+
+def test_run_experiment_uses_mean_sequential_baseline(tmp_path: Path) -> None:
+    code = e1_speedup.main(
+        [
+            "--workers",
+            "1,2",
+            "--blocks",
+            "2",
+            "--trials",
+            "2",
+            "--difficulty",
+            "1",
+            "--nonce-space",
+            "100000",
+            "--tx-per-block",
+            "2",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+    assert code == 0
+
+    rows = read_results(tmp_path / "e1_speedup.csv")
+    # 2 worker configs x 2 trials x 4 metrics = 16 rows
+    assert len(rows) == 16
+
+    seq_times = [
+        float(r["value"])
+        for r in rows
+        if int(r["n_nodes"]) == 1 and r["metric"] == "mining_time_s"
+    ]
+    mean_seq = sum(seq_times) / len(seq_times)
+
+    for trial in (1, 2):
+        par_time = next(
+            float(r["value"])
+            for r in rows
+            if int(r["n_nodes"]) == 2
+            and int(r["trial"]) == trial
+            and r["metric"] == "mining_time_s"
+        )
+        par_speedup = next(
+            float(r["value"])
+            for r in rows
+            if int(r["n_nodes"]) == 2
+            and int(r["trial"]) == trial
+            and r["metric"] == "speedup"
+        )
+        assert par_speedup == pytest.approx(mean_seq / par_time)

@@ -193,3 +193,53 @@ def test_get_status_matches_node_status_contract_and_mempool_endpoint(log_dir_en
     mempool_body = mempool_resp.get_json()
     assert mempool_body["size"] == 1
     assert mempool_body["transactions"][0]["sender"] == "alice"
+
+
+def test_post_tx_forwarded_reflects_peer_call_results(log_dir_env: Path) -> None:
+    class _PeerResult:
+        def __init__(self, ok: bool) -> None:
+            self.ok = ok
+
+    _, _, _, empty_peers_client = _make_node(on_tx_received=lambda _: [])
+    resp_empty = empty_peers_client.post(
+        "/tx", json={"sender": "alice", "receiver": "bob", "amount": 1.0, "timestamp_ms": 1}
+    )
+    assert resp_empty.status_code == 201
+    assert resp_empty.get_json()["forwarded"] is False
+
+    _, _, _, failed_peers_client = _make_node(
+        on_tx_received=lambda _: [_PeerResult(False), _PeerResult(False)]
+    )
+    resp_failed = failed_peers_client.post(
+        "/tx", json={"sender": "alice", "receiver": "bob", "amount": 2.0, "timestamp_ms": 2}
+    )
+    assert resp_failed.status_code == 201
+    assert resp_failed.get_json()["forwarded"] is False
+
+    _, _, _, partial_ok_client = _make_node(
+        on_tx_received=lambda _: [_PeerResult(False), _PeerResult(True)]
+    )
+    resp_ok = partial_ok_client.post(
+        "/tx", json={"sender": "alice", "receiver": "bob", "amount": 3.0, "timestamp_ms": 3}
+    )
+    assert resp_ok.status_code == 201
+    assert resp_ok.get_json()["forwarded"] is True
+
+
+def test_post_tx_rejects_oversized_payload_with_413() -> None:
+    mempool = Mempool()
+    chain = Blockchain(difficulty=1, mempool=mempool)
+    app = create_app(
+        node_id="node-1",
+        chain=chain,
+        mempool=mempool,
+        max_content_length=128,
+    )
+    client = app.test_client()
+    resp = client.post(
+        "/tx",
+        json={"sender": "alice", "receiver": "bob", "amount": 1.0, "padding": "x" * 256},
+    )
+    assert resp.status_code == 413
+    assert "error" in resp.get_json()
+    assert mempool.size() == 0
