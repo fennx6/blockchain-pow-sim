@@ -34,6 +34,32 @@ root repo dari lokasi file (`/app`), sehingga default `proto/` dan
 `.\scripts\gen_proto.ps1` (Windows) atau `./scripts/gen_proto.sh` (POSIX)
 sebelum `pytest`, karena file hasil generate tidak di-commit.
 
+## Fitur 3: event gossip dan sync untuk E2/E3
+
+`node/gossip.py` menulis satu event `tx_forwarded` per peer (field `tx_id`,
+`origin_node`, `from_node`, `to_node`, `ok`, `error`) dan event tambahan
+`block_forwarded` per peer (field `index`, `block_hash`, `from_node`, `to_node`,
+`ok`, `error`). `block_forwarded` bukan event baku di AGENTS.md 9.2; usul D9
+diperluas agar E2 bisa memisahkan "blok dikirim" dari "blok diterima".
+
+`node/sync.py` menulis `sync_start` (`peer`, `local_height`, `peer_height`) dan
+`sync_done` (`peer`, `from_height`, `to_height`, `blocks_pulled`,
+`blocks_added`, `fork_replaced`). `catch_up` mengembalikan jumlah blok yang
+ditarik, termasuk fetch rantai penuh saat peer berada di fork yang lebih berat.
+
+**Wiring yang dibutuhkan di `node/main.py` (fitur 4, milik B):**
+
+- `on_tx_received=gossip.broadcast_tx` pada `api.create_app`.
+- `on_block_mined=gossip.broadcast_block` pada `Miner`.
+- Handler `on_block` di `NodeService`: `chain.add_block(block)`; jika
+  `ORPHAN` panggil `sync_service.sync_now([sender])` lalu
+  `miner.notify_new_block()` bila tip berubah; jika `ACCEPTED` atau
+  `FORK_SWITCHED` panggil `miner.notify_new_block()`.
+- `SyncService` periodik memakai `heartbeat_interval_s` sebagai interval agar
+  node yang restart mengejar rantai tanpa menunggu blok baru.
+- Saat shutdown, panggil `gossip.close()` dan `sync_service.stop()` agar channel
+  gRPC dan thread latar belakang berhenti bersih.
+
 ## Fitur 5 (rencana): CoordinatorService dan mode pool
 
 Proto sudah memuat `CoordinatorService.SubmitTemplate` (lihat komentar D13 di
