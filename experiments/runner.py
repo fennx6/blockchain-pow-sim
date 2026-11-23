@@ -7,9 +7,10 @@ dan pencatatan metrik ke CSV. Tidak ada angka hasil di modul ini.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,13 +59,15 @@ def run_command(
     cwd: Path | None = None,
     dry_run: bool = False,
     check: bool = True,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Jalankan perintah eksternal dengan log yang bisa direproduksi."""
     printable = " ".join(args)
     logger.info("%s%s", "[dry-run] " if dry_run else "[run] ", printable)
     if dry_run:
         return subprocess.CompletedProcess(list(args), 0, "", "")
-    return subprocess.run(args, cwd=cwd, text=True, check=check)
+    merged_env = None if env is None else {**os.environ, **env}
+    return subprocess.run(args, cwd=cwd, text=True, check=check, env=merged_env)
 
 
 def compose(
@@ -72,10 +75,12 @@ def compose(
     compose_file: Path = DEFAULT_COMPOSE_FILE,
     dry_run: bool = False,
     check: bool = True,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Panggil ``docker compose -f <file> ...``."""
     return run_command(
         ["docker", "compose", "-f", str(compose_file), *args],
         dry_run=dry_run,
         check=check,
+        env=env,
     )
