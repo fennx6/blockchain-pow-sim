@@ -125,9 +125,7 @@ def test_run_experiment_uses_mean_sequential_baseline(tmp_path: Path) -> None:
     assert len(rows) == 16
 
     seq_times = [
-        float(r["value"])
-        for r in rows
-        if int(r["n_nodes"]) == 1 and r["metric"] == "mining_time_s"
+        float(r["value"]) for r in rows if int(r["n_nodes"]) == 1 and r["metric"] == "mining_time_s"
     ]
     mean_seq = sum(seq_times) / len(seq_times)
 
@@ -142,8 +140,6 @@ def test_run_experiment_uses_mean_sequential_baseline(tmp_path: Path) -> None:
         par_speedup = next(
             float(r["value"])
             for r in rows
-            if int(r["n_nodes"]) == 2
-            and int(r["trial"]) == trial
-            and r["metric"] == "speedup"
+            if int(r["n_nodes"]) == 2 and int(r["trial"]) == trial and r["metric"] == "speedup"
         )
         assert par_speedup == pytest.approx(mean_seq / par_time)
