@@ -210,15 +210,26 @@ class PoolJobManager:
         Mengembalikan daftar assignment baru yang harus dikirim ke worker.
         Job yang sudah selesai tidak diubah.
         """
+        grouped = self.reassign_grouped(job_id, dead_node_id)
+        return [assignment for items in grouped.values() for assignment in items]
+
+    def reassign_grouped(
+        self, job_id: str, dead_node_id: str
+    ) -> dict[str, list[WorkAssignment]]:
+        """Sama seperti :meth:`reassign`, tetapi hasilnya dikelompokkan per worker.
+
+        Coordinator memakai bentuk ini untuk mengirim setiap potongan rentang ke
+        worker yang tepat tanpa menebak dari ``WorkAssignment`` saja.
+        """
+        grouped: dict[str, list[WorkAssignment]] = {}
         with self._lock:
             job = self._require(job_id)
             if job.finished:
-                return []
+                return grouped
             lost = job.assignments.pop(dead_node_id, [])
             if not lost:
-                return []
+                return grouped
             alive = sorted(job.assignments)
-            new_assignments: list[WorkAssignment] = []
             if alive:
                 for lost_item in lost:
                     size = lost_item.nonce_end - lost_item.nonce_start
@@ -228,7 +239,7 @@ class PoolJobManager:
                     for worker, (start, end) in zip(alive, pieces, strict=True):
                         assignment = WorkAssignment(job_id, job.block_template, start, end)
                         job.assignments[worker].append(assignment)
-                        new_assignments.append(assignment)
+                        grouped.setdefault(worker, []).append(assignment)
             lost_span = sum(item.nonce_end - item.nonce_start for item in lost)
 
         log_event(
@@ -237,9 +248,11 @@ class PoolJobManager:
             job_id=job_id,
             dead_node=dead_node_id,
             lost_span=lost_span,
-            targets=sorted({item.nonce_start for item in new_assignments}),
+            targets=sorted(
+                {item.nonce_start for items in grouped.values() for item in items}
+            ),
         )
-        return new_assignments
+        return grouped
 
     def finish(self, job_id: str, reason: str = "block_received") -> None:
         """Tutup job tanpa pemenang, misalnya karena blok datang dari node lain."""

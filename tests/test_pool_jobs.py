@@ -200,6 +200,23 @@ def test_reassign_with_single_alive_worker_takes_whole_span(
     assert job.ranges_for("node-1") == [(0, 50), (50, 100)]
 
 
+def test_reassign_grouped_keeps_worker_mapping(
+    three_nodes: list[NodeRecord], log_dir_env: Path
+) -> None:
+    manager = make_manager(three_nodes)
+    job = manager.start_job(make_block())
+
+    grouped = manager.reassign_grouped(job.job_id, "node-2")
+
+    assert sorted(grouped) == ["node-1", "node-3"]
+    assert sorted((item.nonce_start, item.nonce_end) for item in grouped["node-1"]) == [
+        (300, 450)
+    ]
+    assert sorted((item.nonce_start, item.nonce_end) for item in grouped["node-3"]) == [
+        (450, 600)
+    ]
+
+
 def test_unknown_job_is_rejected(two_nodes: list[NodeRecord], log_dir_env: Path) -> None:
     manager = make_manager(two_nodes)
     with pytest.raises(ValueError, match="tidak dikenal"):
