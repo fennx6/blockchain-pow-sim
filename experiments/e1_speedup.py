@@ -186,12 +186,16 @@ class _WorkerPool:
         ]
 
     def __enter__(self) -> _WorkerPool:
-        for proc in self._processes:
-            proc.start()
-        # Wait until every spawned worker has finished importing and is ready to mine
-        # so process startup overhead is never included in Trial 1 timing.
-        for _ in range(self._n_workers):
-            self._ready_queue.get(timeout=WORKER_READY_TIMEOUT_S)
+        try:
+            for proc in self._processes:
+                proc.start()
+            # Wait until every spawned worker has finished importing and is ready to mine
+            # so process startup overhead is never included in Trial 1 timing.
+            for _ in range(self._n_workers):
+                self._ready_queue.get(timeout=WORKER_READY_TIMEOUT_S)
+        except Exception:
+            self.__exit__()
+            raise
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -199,6 +203,8 @@ class _WorkerPool:
         for task_q in self._task_queues:
             task_q.put(None)
         for proc in self._processes:
+            if proc.pid is None:
+                continue
             proc.join(timeout=5.0)
             if proc.is_alive():
                 proc.terminate()
