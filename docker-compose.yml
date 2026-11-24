@@ -19,6 +19,9 @@ x-node-env: &node-env
   BLOCK_SIZE: "${BLOCK_SIZE:-50}"
   CONFIRMATIONS: "${CONFIRMATIONS:-3}"
   COORDINATOR_URL: "http://coordinator:8080"
+  # Alamat gRPC coordinator di dalam network chainnet; wajib untuk mode pool
+  # (SubmitTemplate/SubmitWorkResult). Tanpa ini node tidak membuat client.
+  COORDINATOR_GRPC: "coordinator:50052"
 
 x-node-base: &node-base
   build: *node-build
@@ -39,9 +42,13 @@ services:
     image: chainsim-coordinator:dev
     ports:
       - "127.0.0.1:8080:8080"
+    # Hanya di network internal; node menghubungi coordinator:50052.
+    expose:
+      - "50052"
     environment:
       COORDINATOR_HOST: "0.0.0.0"
       COORDINATOR_PORT: "8080"
+      COORDINATOR_GRPC_PORT: "50052"
       LOG_DIR: /app/logs
       LOG_LEVEL: "INFO"
       HEARTBEAT_INTERVAL_S: "${HEARTBEAT_INTERVAL_S:-2}"

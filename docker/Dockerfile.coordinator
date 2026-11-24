@@ -8,12 +8,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Dependensi lebih dulu: grpc_tools dibutuhkan untuk membangkitkan kode gRPC.
 COPY requirements.txt pyproject.toml ./
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY src ./src
 COPY config ./config
+COPY proto ./proto
+# Hanya skrip generator yang dibutuhkan image ini.
+COPY scripts/gen_proto.py ./scripts/gen_proto.py
 
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir --no-deps .
+# Coordinator mengimpor node.convert (dipakai servicer gRPC), jadi modul
+# generated wajib ada sebelum paket diinstal.
+RUN python scripts/gen_proto.py \
+    && pip install --no-cache-dir --no-deps . \
+    && python -c "from chainsim.generated import blockchain_pb2, blockchain_pb2_grpc"
 
 RUN useradd --create-home --uid 10001 chainsim \
     && mkdir -p /app/logs \
@@ -21,6 +30,6 @@ RUN useradd --create-home --uid 10001 chainsim \
 
 USER chainsim
 
-EXPOSE 8080
+EXPOSE 8080 50052
 
 CMD ["python", "-m", "chainsim.coordinator.main"]
