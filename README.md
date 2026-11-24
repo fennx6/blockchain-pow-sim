@@ -4,9 +4,12 @@ Proyek UAS Komputasi Paralel dan Terdistribusi, Tema 4: simulasi blockchain
 terdistribusi dengan Proof-of-Work, konsensus rantai terpanjang, dan pemulihan
 setelah node gagal. Dibangun dengan Flask, gRPC, dan Docker.
 
-> Status: **Fase 0 - kerangka proyek**. Kontrak antarmodul sudah dibekukan dan
-> modul coordinator berjalan, tetapi `core/` dan lapisan gRPC masih placeholder
-> milik anggota A dan B. Jaringan belum menambang blok.
+> Status: implementasi inti selesai. Core blockchain, PoW, gRPC/gossip/sync,
+> coordinator, dashboard, dan skrip E1-E4 sudah ada dan saling terhubung.
+> Alur multi-node (transaksi, mining, propagasi blok, catch-up setelah restart)
+> sudah diuji in-process; verifikasi 6 node lewat Docker Compose menyusul.
+> Angka eksperimen resmi baru diisi setelah run nyata di
+> `experiments/results/`.
 
 ## Prasyarat
 
@@ -47,6 +50,13 @@ Jaringan default: 1 coordinator + 6 node pada network `chainnet`. Setiap node
 punya volume sendiri (`node-N-data`) sehingga rantai bertahan setelah restart.
 Port node hanya ada di dalam network; host hanya membuka dashboard.
 
+Coordinator membuka gRPC di port `50052` (internal `chainnet`). Node menerima
+alamatnya dari `COORDINATOR_GRPC=coordinator:50052` yang sudah diisi di
+`docker-compose.yml`; tanpa itu mode pool tidak bisa melapor ke coordinator.
+Image Docker membangkitkan kode gRPC dari `proto/` saat build, jadi clone
+bersih tidak perlu menjalankan `scripts/gen_proto.ps1` lebih dulu untuk
+Docker.
+
 ```powershell
 docker compose logs -f coordinator
 docker compose down            # tambah -v hanya jika ingin menghapus volume rantai
@@ -70,7 +80,11 @@ contoh.
 ## Transaksi dan injeksi kegagalan
 
 ```powershell
-python scripts/tx_generator.py --rate 5 --duration 60
+# Port REST node tidak dipublikasikan ke host, jadi generator dijalankan
+# di dalam network terhadap node-1.
+docker compose exec node-1 python scripts/tx_generator.py `
+  --rate 5 --duration 60 --target http://node-1:8081/tx
+
 python scripts/fault_inject.py stop --service node-3
 python scripts/fault_inject.py start --service node-3
 python scripts/fault_inject.py remove-volume --service node-3
@@ -86,8 +100,14 @@ Setiap aksi injeksi dicatat sebagai event `fault_injected` di
 python experiments/e3_fault.py --dry-run
 python experiments/e4_scalability.py --dry-run
 python experiments/compose_gen.py --nodes 16 --mode pool
+python experiments/tx_log.py --logs-dir logs
 python experiments/plot.py
 ```
+
+`tx_log.py` menggabungkan `logs/*.jsonl` menjadi
+`experiments/results/tx_log.csv` (`ts_ms, tx_id, from_node, to_node, event`)
+dan mencetak timeline satu transaksi dari node asal ke peer, ditambah konteks
+blok sesudahnya. Gunakan `--tx-id <id>` untuk memilih transaksi tertentu.
 
 `compose_gen.py` menurunkan file compose untuk N node (2/4/8/16) dari
 `docker-compose.yml` ke `experiments/.generated/` (tidak di-commit), sehingga
@@ -120,8 +140,9 @@ docs/                         arsitektur, keputusan, lingkungan lab, draf lapora
 
 Semua angka ada di `config/settings.yaml` dan dapat ditimpa environment
 (`DIFFICULTY`, `MINING_MODE`, `NODE_REST_PORT`, `NODE_GRPC_PORT`, `PEERS`,
-`NODES`, `HEARTBEAT_INTERVAL_S`, `LOG_DIR`, dan seterusnya). Salin
-`.env.example` menjadi `.env` untuk pengaturan lokal; `.env` tidak di-commit.
+`NODES`, `COORDINATOR_GRPC`, `COORDINATOR_GRPC_PORT`, `HEARTBEAT_INTERVAL_S`,
+`LOG_DIR`, dan seterusnya). Salin `.env.example` menjadi `.env` untuk
+pengaturan lokal; `.env` tidak di-commit.
 
 ## Pengujian
 
