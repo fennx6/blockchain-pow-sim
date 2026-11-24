@@ -8,13 +8,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Lapisan dependensi dipisah dari kode agar rebuild cepat saat kode berubah.
+# Dependensi dipasang lebih dulu agar layer cache stabil dan grpc_tools sudah
+# tersedia saat kode gRPC dibangkitkan di langkah berikutnya.
 COPY requirements.txt pyproject.toml ./
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY src ./src
 COPY config ./config
+COPY proto ./proto
+# scripts/ ikut disalin karena tx_generator dipakai E4 lewat `compose exec`.
+COPY scripts ./scripts
 
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir --no-deps .
+# File *_pb2*.py di-gitignore, jadi image harus membangkitkannya sendiri supaya
+# build dari clone bersih tetap bisa mengimpor chainsim.generated.
+RUN python scripts/gen_proto.py \
+    && pip install --no-cache-dir --no-deps . \
+    && python -c "from chainsim.generated import blockchain_pb2, blockchain_pb2_grpc"
 
 RUN useradd --create-home --uid 10001 chainsim \
     && mkdir -p /app/logs /app/data \
