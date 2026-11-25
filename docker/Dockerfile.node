@@ -18,6 +18,9 @@ COPY config ./config
 COPY proto ./proto
 # scripts/ ikut disalin karena tx_generator dipakai E4 lewat `compose exec`.
 COPY scripts ./scripts
+# E2/E4 dapat dijalankan di dalam network tanpa mount repo host. Hasil tetap
+# ditulis ke volume/mount `experiments/results` saat dipanggil dengan --output-dir.
+COPY experiments ./experiments
 
 # File *_pb2*.py di-gitignore, jadi image harus membangkitkannya sendiri supaya
 # build dari clone bersih tetap bisa mengimpor chainsim.generated.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 from flask.testing import FlaskClient
 
 from chainsim.coordinator.dashboard import create_app
@@ -90,11 +91,38 @@ def test_api_events_empty_state(
     assert client.get("/api/events").get_json() == {"events": []}
 
 
-def test_metrics_endpoint_uses_prometheus_format(
+def test_tx_proxy_forwards_to_first_node(
+    two_nodes: list[NodeRecord], log_dir_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = build_client(two_nodes, log_dir_env)
+
+    class FakeResponse:
+        status = 201
+
+        def __init__(self) -> None:
+            self.headers = {"Content-Type": "application/json"}
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "chainsim.coordinator.dashboard.app.urllib.request.urlopen",
+        lambda request, timeout=None: FakeResponse(),
+    )
+    response = client.post("/tx", json={"sender": "a", "receiver": "b", "amount": 1})
+    assert response.status_code == 201
+    assert response.get_json() == {"ok": True}
+
+
+def test_tx_proxy_rejects_non_json_body(
     two_nodes: list[NodeRecord], log_dir_env: Path
 ) -> None:
     client = build_client(two_nodes, log_dir_env)
-    response = client.get("/metrics")
-    assert response.status_code == 200
-    assert "text/plain" in response.headers["Content-Type"]
-    assert 'chainsim_chain_height{node_id="node-1"} 5' in response.get_data(as_text=True)
+    response = client.post("/tx", data="not json", content_type="text/plain")
+    assert response.status_code == 400

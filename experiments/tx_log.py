@@ -5,10 +5,10 @@ yang ditulis ``logging_utils.log_event`` saat jaringan benar-benar berjalan;
 skrip ini tidak mengarang kejadian.
 
 CSV keluaran memakai kolom wajib ``ts_ms, tx_id, from_node, to_node, event``
-dan hanya berisi event ``tx_received`` dan ``tx_forwarded``. Event blok belum
-membawa daftar ``tx_id`` (logging blok milik anggota A), jadi timeline
-menampilkan blok sesudah transaksi sebagai konteks dan memberi label eksplisit
-alih-alih mengklaim bahwa transaksi tertentu masuk ke blok tersebut.
+dan hanya berisi event ``tx_received`` dan ``tx_forwarded``. Event blok membawa
+``tx_ids`` (maksimal 10 tx pertama), sehingga timeline dapat menyatakan apakah
+transaksi yang ditampilkan benar-benar tercantum di blok, bukan hanya
+menampilkan blok sebagai konteks.
 """
 
 from __future__ import annotations
@@ -150,14 +150,26 @@ def format_timeline(
     blocks.sort(key=lambda event: event.ts_ms)
     lines.append("")
     if blocks:
-        lines.append("  blok sesudah transaksi (konteks; log blok belum memuat tx_id):")
+        lines.append(
+            "  blok sesudah transaksi (tx_ids hanya 10 tx pertama; "
+            "label menunjukkan keanggotaan):"
+        )
         for event in blocks[:max_blocks]:
             index = _text(event.fields.get("index"))
             block_hash = _text(event.fields.get("block_hash"))
+            raw_ids = event.fields.get("tx_ids")
+            if isinstance(raw_ids, list | tuple):
+                membership = (
+                    "tx ADA di blok"
+                    if tx_id in {_text(item) for item in raw_ids}
+                    else "tx tidak tercantum di tx_ids"
+                )
+            else:
+                membership = "tx_ids tidak tersedia"
             lines.append(
                 f"  {event.ts_ms:<10} {event.ts_ms - start_ms:>6}  "
                 f"{event.event:<14} {event.node_id} "
-                f"index={index or '-'} hash={block_hash[:12] or '-'}"
+                f"index={index or '-'} hash={block_hash[:12] or '-'} {membership}"
             )
         if len(blocks) > max_blocks:
             lines.append(f"  ... {len(blocks) - max_blocks} event blok lain")

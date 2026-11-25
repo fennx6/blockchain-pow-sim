@@ -26,7 +26,7 @@ from chainsim.core.block import build_block_template, compute_merkle_root
 from chainsim.core.chain import Blockchain
 from chainsim.core.mempool import Mempool
 from chainsim.core.pow import is_valid_pow
-from chainsim.logging_utils import log_event
+from chainsim.logging_utils import MAX_LOGGED_TX_IDS, log_event
 from chainsim.node.api import create_app
 from chainsim.node.gossip import ClientFactory as GossipClientFactory
 from chainsim.node.gossip import Gossip
@@ -204,11 +204,11 @@ class NodeRuntime:
             return True, result.value
         if result == AddResult.ORPHAN:
             self.miner.notify_new_block()
-            try:
-                self.sync.sync_now()
-            except Exception:
-                logger.exception("catch-up after orphan block %s failed", block.hash)
-            return True, "orphan_sync_triggered"
+            # Do not run catch-up inside the gRPC handler: with many peers this
+            # blocks AnnounceBlock acknowledgements and can exhaust the server
+            # thread pool. The sync loop coalesces requests and runs it.
+            self.sync.request_sync()
+            return True, "orphan_sync_scheduled"
         if result in (AddResult.DUPLICATE, AddResult.STORED_SIDE):
             return True, result.value
         return False, "invalid"
@@ -374,6 +374,22 @@ class NodeRuntime:
                 add_result.value,
             )
             return
+
+        # Only the committed winner logs block_mined; losing candidates log
+        # candidate_found in Miner._pool_loop. Experiment scripts treat
+        # block_mined as a block that actually entered the chain.
+        log_event(
+            "block_mined",
+            self.node_id,
+            job_id=assignment.job_id,
+            index=block.index,
+            block_hash=block.hash,
+            nonce=block.nonce,
+            difficulty=block.difficulty,
+            tx_count=len(block.transactions),
+            tx_ids=[tx.tx_id for tx in block.transactions[:MAX_LOGGED_TX_IDS]],
+            mode="pool",
+        )
 
         self.miner.notify_new_block()
         self.gossip.broadcast_block(block)

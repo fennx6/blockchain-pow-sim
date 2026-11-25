@@ -27,7 +27,12 @@ if str(_EXPERIMENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_EXPERIMENTS_DIR))
 
 from compose_gen import ComposeSpec, write_compose  # noqa: E402
-from e2_propagation import LogEvent, load_events, propagation_stats  # noqa: E402
+from e2_propagation import (  # noqa: E402
+    LogEvent,
+    canonical_block_events,
+    load_events,
+    propagation_stats,
+)
 from metrics import efficiency, latency_stats, throughput  # noqa: E402
 from runner import (  # noqa: E402
     RESULTS_DIR,
@@ -92,18 +97,14 @@ def window_events(
 def blocks_in_window(
     events: list[LogEvent], since_ts_ms: int, until_ts_ms: int
 ) -> tuple[int, int]:
-    """``(jumlah blok, jumlah transaksi)`` dari ``block_mined`` di jendela."""
-    mined = [
-        event
-        for event in window_events(events, since_ts_ms, until_ts_ms)
-        if event.event == "block_mined"
-    ]
+    """``(jumlah blok kanonik, jumlah transaksi)`` di jendela pengamatan."""
+    confirmed = canonical_block_events(window_events(events, since_ts_ms, until_ts_ms))
     txs = 0
-    for event in mined:
+    for event in confirmed:
         count = event.fields.get("tx_count")
         if isinstance(count, int) and not isinstance(count, bool):
             txs += count
-    return len(mined), txs
+    return len(confirmed), txs
 
 
 def propagation_delays(

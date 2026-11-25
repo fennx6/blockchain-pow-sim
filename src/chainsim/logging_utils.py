@@ -21,8 +21,12 @@ _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 _WRITE_LOCK = threading.Lock()
 _LOGGER_LOCK = threading.Lock()
 _LOGGERS: dict[str, logging.Logger] = {}
+logger = logging.getLogger(__name__)
 
 DEFAULT_LOG_DIR = "logs"
+# Block events only carry the first few transaction IDs so one JSONL line stays
+# readable; the full block is still available through the chain/REST API.
+MAX_LOGGED_TX_IDS = 10
 
 
 def log_dir() -> Path:
@@ -46,7 +50,6 @@ def log_event(event: str, node_id: str, **fields: Any) -> None:
     if not event:
         raise ValueError("event tidak boleh kosong")
     directory = log_dir()
-    directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{_safe_file_stem(node_id)}.jsonl"
 
     record: dict[str, Any] = dict(fields)
@@ -55,9 +58,15 @@ def log_event(event: str, node_id: str, **fields: Any) -> None:
     record["event"] = event
 
     line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str)
-    with _WRITE_LOCK:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with _WRITE_LOCK:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+    except OSError:
+        # Logging must never kill the miner or a gRPC handler. A read-only or
+        # mis-owned log volume is a deployment problem, not a chain failure.
+        logger.exception("gagal menulis event %s untuk %s ke %s", event, node_id, path)
 
 
 def _iter_events(directory: Path) -> Iterable[dict[str, Any]]:

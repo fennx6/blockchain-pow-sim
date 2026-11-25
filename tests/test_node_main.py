@@ -198,7 +198,13 @@ def test_runtime_orphan_triggers_sync(tmp_path: Path, log_dir_env: Path) -> None
     try:
         ok, message = runtime.handle_block(peer_chain[2])
         assert ok is True
-        assert message == "orphan_sync_triggered"
+        assert message == "orphan_sync_scheduled"
+        runtime.sync.start()
+        deadline = time.monotonic() + 2.0
+        while (
+            runtime.chain.height() < 2 or not fake.closed
+        ) and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert runtime.chain.height() == 2
         assert runtime.chain.tip().hash == peer_chain[-1].hash
         assert fake.closed is True

@@ -82,7 +82,9 @@ class PoolJob:
 
     def covers(self, node_id: str, nonce: int) -> bool:
         return any(
-            item.nonce_start <= nonce < item.nonce_end for item in self.assignments.get(node_id, [])
+            (item.nonce_start <= nonce < item.nonce_end)
+            or (item.nonce_start == item.nonce_end and nonce == item.nonce_start)
+            for item in self.assignments.get(node_id, [])
         )
 
 
@@ -131,8 +133,16 @@ class PoolJobManager:
             if len(set(workers)) != len(workers):
                 raise ValueError(f"worker duplikat: {workers}")
             active = self._jobs.get(self._active_job_id) if self._active_job_id else None
+            stale_job_id: str | None = None
             if active is not None and not active.finished:
-                raise RuntimeError(f"job {active.job_id} masih berjalan")
+                # A worker can submit a template on the old tip just before the
+                # winner's block arrives. That stale job would otherwise stay
+                # active forever and block every later SubmitTemplate.
+                if block_template.index > active.block_template.index:
+                    active.finished = True
+                    stale_job_id = active.job_id
+                else:
+                    raise RuntimeError(f"job {active.job_id} masih berjalan")
 
             self._counter += 1
             job_id = f"job-{block_template.index}-{self._counter}"
@@ -151,6 +161,13 @@ class PoolJobManager:
             self._jobs[job_id] = job
             self._active_job_id = job_id
 
+        if stale_job_id is not None:
+            log_event(
+                "job_finished",
+                COORDINATOR_ID,
+                job_id=stale_job_id,
+                reason="stale_template",
+            )
         log_event(
             "job_assigned",
             COORDINATOR_ID,
@@ -170,6 +187,7 @@ class PoolJobManager:
         found: bool = True,
     ) -> WorkResult:
         """Catat laporan worker; nonce di luar rentangnya dianggap tidak sah."""
+        exhausted_all = False
         with self._lock:
             job = self._require(job_id)
             if job.finished:
@@ -192,6 +210,13 @@ class PoolJobManager:
                 job.winner_node = node_id
                 job.winner_hash = block_hash
                 job.finished = True
+            elif len(job.results) == len(job.assignments) and all(
+                len(items) == 1 for items in job.assignments.values()
+            ):
+                # No worker has a second (reassigned) range, so every range is
+                # exhausted. Finish the job instead of blocking all future jobs.
+                job.finished = True
+                exhausted_all = True
 
         if found:
             log_event(
@@ -201,6 +226,13 @@ class PoolJobManager:
                 winner=node_id,
                 nonce=nonce,
                 block_hash=block_hash,
+            )
+        elif exhausted_all:
+            log_event(
+                "job_finished",
+                COORDINATOR_ID,
+                job_id=job_id,
+                reason="all_exhausted",
             )
         return result
 
