@@ -14,10 +14,10 @@ x-node-env: &node-env
   NODE_GRPC_PORT: "50051"
   LOG_DIR: /app/logs
   LOG_LEVEL: "INFO"
-  DIFFICULTY: "${DIFFICULTY:-4}"
-  MINING_MODE: "${MINING_MODE:-compete}"
-  BLOCK_SIZE: "${BLOCK_SIZE:-50}"
-  CONFIRMATIONS: "${CONFIRMATIONS:-3}"
+  DIFFICULTY: "${DIFFICULTY:-}"
+  MINING_MODE: "${MINING_MODE:-}"
+  BLOCK_SIZE: "${BLOCK_SIZE:-}"
+  CONFIRMATIONS: "${CONFIRMATIONS:-}"
   COORDINATOR_URL: "http://coordinator:8080"
   # Alamat gRPC coordinator di dalam network chainnet; wajib untuk mode pool
   # (SubmitTemplate/SubmitWorkResult). Tanpa ini node tidak membuat client.
@@ -51,8 +51,8 @@ services:
       COORDINATOR_GRPC_PORT: "50052"
       LOG_DIR: /app/logs
       LOG_LEVEL: "INFO"
-      HEARTBEAT_INTERVAL_S: "${HEARTBEAT_INTERVAL_S:-2}"
-      HEARTBEAT_TIMEOUT_S: "${HEARTBEAT_TIMEOUT_S:-1}"
+      HEARTBEAT_INTERVAL_S: "${HEARTBEAT_INTERVAL_S:-}"
+      HEARTBEAT_TIMEOUT_S: "${HEARTBEAT_TIMEOUT_S:-}"
       NODES: >-
         node-1=node-1:8081,node-2=node-2:8081,node-3=node-3:8081,
         node-4=node-4:8081,node-5=node-5:8081,node-6=node-6:8081

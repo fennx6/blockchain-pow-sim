@@ -308,20 +308,52 @@ def propagation_stats(
     )
 
 
-def throughput_stats(events: Iterable[LogEvent], duration_s: float = 0.0) -> ThroughputStats:
-    """Mined block/transaction throughput over ``duration_s`` seconds.
+def canonical_block_events(events: Iterable[LogEvent]) -> list[LogEvent]:
+    """Return one event per block that is still on the canonical chain.
 
-    When ``duration_s`` is zero, the span between the first and last
-    ``block_mined`` event is used. A single block with no explicit duration
-    therefore yields zero throughput instead of a fabricated number.
+    ``block_accepted`` is written by every node that adds a block, so events are
+    deduplicated by ``block_hash``. Blocks listed in a later ``fork_switched``
+    ``discarded_hashes`` field are removed. Logs from before the field existed
+    fall back to unique ``block_mined`` events.
     """
-    mined = [event for event in events if event.event == "block_mined"]
-    blocks = len(mined)
-    txs = sum(_as_int(event.fields.get("tx_count")) or 0 for event in mined)
+    accepted: dict[str, LogEvent] = {}
+    mined: dict[str, LogEvent] = {}
+    discarded: set[str] = set()
+
+    for event in events:
+        if event.event == "block_accepted":
+            block_hash = _as_str(event.fields.get("block_hash"))
+            if block_hash:
+                accepted.setdefault(block_hash, event)
+        elif event.event == "block_mined":
+            block_hash = _as_str(event.fields.get("block_hash"))
+            if block_hash:
+                mined.setdefault(block_hash, event)
+        elif event.event == "fork_switched":
+            raw = event.fields.get("discarded_hashes") or []
+            if isinstance(raw, list | tuple):
+                discarded.update(str(item).strip() for item in raw if str(item).strip())
+
+    if accepted:
+        return [event for block_hash, event in accepted.items() if block_hash not in discarded]
+    return list(mined.values())
+
+
+def throughput_stats(events: Iterable[LogEvent], duration_s: float = 0.0) -> ThroughputStats:
+    """Confirmed block/transaction throughput over ``duration_s`` seconds.
+
+    Blocks are deduplicated by hash and fork-discarded blocks are removed. When
+    ``duration_s`` is zero, the span between the first and last confirmed block
+    is used. A single block with no explicit duration therefore yields zero
+    throughput instead of a fabricated number.
+    """
+    confirmed = canonical_block_events(events)
+    blocks = len(confirmed)
+    txs = sum(_as_int(event.fields.get("tx_count")) or 0 for event in confirmed)
     window = float(duration_s)
-    if window <= 0 and len(mined) > 1:
+    if window <= 0 and len(confirmed) > 1:
         window = (
-            max(event.ts_ms for event in mined) - min(event.ts_ms for event in mined)
+            max(event.ts_ms for event in confirmed) - min(event.ts_ms for event in confirmed)
         ) / 1000.0
     if window <= 0:
         return ThroughputStats(blocks, txs, 0.0, 0.0, 0.0)
@@ -364,6 +396,28 @@ def parse_nodes(raw: str) -> tuple[str, ...]:
 
 def infer_nodes(events: Iterable[LogEvent]) -> tuple[str, ...]:
     return tuple(sorted({event.node_id for event in events if event.node_id != COORDINATOR_ID}))
+
+
+def infer_mode(events: Iterable[LogEvent]) -> str:
+    """Read the mode recorded by the nodes instead of the host settings."""
+    for event in events:
+        if event.event != "block_mined":
+            continue
+        value = _as_str(event.fields.get("mode"))
+        if value in {"compete", "pool"}:
+            return value
+    return ""
+
+
+def infer_difficulty(events: Iterable[LogEvent]) -> int | None:
+    """Read the difficulty recorded by the nodes, when a block exists."""
+    for event in events:
+        if event.event != "block_mined":
+            continue
+        value = _as_int(event.fields.get("difficulty"))
+        if value is not None and value >= 1:
+            return value
+    return None
 
 
 def _latency_rows(
@@ -520,6 +574,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--logs-dir", type=Path, default=_REPO_ROOT / "logs")
     parser.add_argument("--nodes", default="", help="comma-separated expected node IDs")
     parser.add_argument(
+        "--mode",
+        choices=("compete", "pool"),
+        default=None,
+        help="override mode metadata; default is inferred from block_mined logs",
+    )
+    parser.add_argument(
+        "--difficulty",
+        type=int,
+        default=None,
+        help="override difficulty metadata; default is inferred from block_mined logs",
+    )
+    parser.add_argument(
         "--grpc-target",
         action="append",
         default=[],
@@ -546,6 +612,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.duration < 0:
         logger.error("--duration must be >= 0")
         return 2
+    if args.difficulty is not None and args.difficulty < 1:
+        logger.error("--difficulty must be >= 1")
+        return 2
 
     events = load_events(args.logs_dir)
     if not events:
@@ -558,6 +627,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     settings = load_settings()
+    mode = args.mode or infer_mode(events) or settings.blockchain.mining_mode
+    difficulty = args.difficulty if args.difficulty is not None else infer_difficulty(events)
+    if difficulty is None:
+        difficulty = settings.blockchain.difficulty
     run_id = args.run_id or new_run_id("e2")
     rtt_samples = (
         measure_grpc_rtt(
@@ -575,8 +648,8 @@ def main(argv: list[str] | None = None) -> int:
         duration_s=args.duration,
         rtt_samples=rtt_samples,
         run_id=run_id,
-        mode=settings.blockchain.mining_mode,
-        difficulty=settings.blockchain.difficulty,
+        mode=mode,
+        difficulty=difficulty,
     )
     if not rows:
         logger.error("no E2 metrics could be computed from %s", args.logs_dir)

@@ -119,9 +119,33 @@ def test_format_timeline_reports_missing_blocks() -> None:
     assert "belum ada block_mined" in text
 
 
-def test_format_timeline_rejects_unknown_tx() -> None:
-    with pytest.raises(ValueError):
-        format_timeline([], [], "tx-x")
+def test_format_timeline_reports_tx_membership_when_tx_ids_present() -> None:
+    rows = [TxRow(1_000, "tx-a", "client", "node-1", "tx_received", origin_node="node-1")]
+    events = [
+        event(
+            1_050,
+            "node-1",
+            "block_mined",
+            index=3,
+            block_hash="abcdef1234567890",
+            tx_ids=["tx-a", "tx-b"],
+        )
+    ]
+    text = format_timeline(rows, events, "tx-a", context_ms=1_000)
+    assert "tx ADA di blok" in text
+
+    events = [
+        event(
+            1_050,
+            "node-1",
+            "block_mined",
+            index=3,
+            block_hash="abcdef1234567890",
+            tx_ids=["tx-z"],
+        )
+    ]
+    text = format_timeline(rows, events, "tx-a", context_ms=1_000)
+    assert "tx tidak tercantum di tx_ids" in text
 
 
 def test_main_writes_csv_and_prints_featured_timeline(

@@ -73,17 +73,22 @@ def test_start_job_requires_workers(log_dir_env: Path) -> None:
         manager.start_job(make_block())
 
 
-def test_second_job_requires_previous_to_finish(
+def test_second_job_replaces_stale_job(
     two_nodes: list[NodeRecord], log_dir_env: Path
 ) -> None:
     manager = make_manager(two_nodes)
     first = manager.start_job(make_block())
     with pytest.raises(RuntimeError, match="masih berjalan"):
-        manager.start_job(make_block(index=2))
+        manager.start_job(make_block())
 
-    manager.finish(first.job_id)
     second = manager.start_job(make_block(index=2))
+    assert first.finished is True
     assert second.job_id == "job-2-2"
+    events = read_recent_events(limit=5, directory=log_dir_env)
+    assert any(
+        event["event"] == "job_finished" and event["reason"] == "stale_template"
+        for event in events
+    )
 
 
 def test_record_result_declares_winner(two_nodes: list[NodeRecord], log_dir_env: Path) -> None:
@@ -137,6 +142,33 @@ def test_exhausted_range_does_not_finish_job(
     manager.record_result(job.job_id, "node-1", nonce=0, found=False)
     assert job.finished is False
     assert job.winner_node is None
+
+
+def test_all_ranges_exhausted_finishes_job(
+    two_nodes: list[NodeRecord], log_dir_env: Path
+) -> None:
+    manager = make_manager(two_nodes, nonce_space=100)
+    job = manager.start_job(make_block())
+    manager.record_result(job.job_id, "node-1", nonce=0, found=False)
+    manager.record_result(job.job_id, "node-2", nonce=50, found=False)
+    assert job.finished is True
+    events = read_recent_events(limit=5, directory=log_dir_env)
+    assert any(
+        event["event"] == "job_finished" and event["reason"] == "all_exhausted"
+        for event in events
+    )
+
+
+def test_empty_nonce_range_can_report_exhaustion(
+    two_nodes: list[NodeRecord], log_dir_env: Path
+) -> None:
+    manager = make_manager(two_nodes, nonce_space=1)
+    job = manager.start_job(make_block())
+    assert job.ranges_for("node-2") == [(1, 1)]
+    manager.record_result(job.job_id, "node-2", nonce=1, found=False)
+    assert job.finished is False
+    manager.record_result(job.job_id, "node-1", nonce=0, found=False)
+    assert job.finished is True
 
 
 def test_reassign_redistributes_dead_worker_span(

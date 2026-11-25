@@ -19,7 +19,7 @@ from chainsim.core.block import build_block_template
 from chainsim.core.chain import Blockchain
 from chainsim.core.mempool import Mempool
 from chainsim.core.pow import mine_with_stats
-from chainsim.logging_utils import log_event
+from chainsim.logging_utils import MAX_LOGGED_TX_IDS, log_event
 from chainsim.types import AddResult, Block, WorkAssignment
 
 logger = logging.getLogger(__name__)
@@ -244,6 +244,7 @@ class Miner:
                     nonce=mined.nonce,
                     difficulty=mined.difficulty,
                     tx_count=len(mined.transactions),
+                    tx_ids=[tx.tx_id for tx in mined.transactions[:MAX_LOGGED_TX_IDS]],
                     mode=self._mode,
                 )
                 self._invoke_block_callback(mined)
@@ -299,7 +300,7 @@ class Miner:
                     )
                     continue
                 log_event(
-                    "block_mined",
+                    "candidate_found",
                     self._node_id,
                     job_id=assignment.job_id,
                     index=mined.index,
@@ -307,6 +308,7 @@ class Miner:
                     nonce=mined.nonce,
                     difficulty=mined.difficulty,
                     tx_count=len(mined.transactions),
+                    tx_ids=[tx.tx_id for tx in mined.transactions[:MAX_LOGGED_TX_IDS]],
                     mode=self._mode,
                 )
 

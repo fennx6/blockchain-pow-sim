@@ -26,7 +26,7 @@ from chainsim.core.mempool import Mempool
 from chainsim.core.pow import is_valid_pow
 from chainsim.core.storage import load_chain, save_chain
 from chainsim.core.transaction import is_valid_transaction
-from chainsim.logging_utils import log_event
+from chainsim.logging_utils import MAX_LOGGED_TX_IDS, log_event
 from chainsim.types import AddResult, Block
 
 
@@ -265,6 +265,7 @@ class Blockchain:
                     "block_hash": block.hash,
                     "miner_id": block.miner_id,
                     "tx_count": len(block.transactions),
+                    "tx_ids": [tx.tx_id for tx in block.transactions[:MAX_LOGGED_TX_IDS]],
                 },
             )
 
@@ -281,6 +282,7 @@ class Blockchain:
                     "old_height": old_tip.index,
                     "new_height": block.index,
                     "blocks_discarded": len(discarded),
+                    "discarded_hashes": [item.hash for item in discarded],
                 },
             )
 

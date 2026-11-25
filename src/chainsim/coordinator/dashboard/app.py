@@ -6,6 +6,9 @@ terjangkau ditandai ``down`` dan metriknya tidak diisi angka pengganti.
 
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +20,7 @@ from chainsim.coordinator.registry import NodeRegistry
 from chainsim.logging_utils import log_dir, read_recent_events
 
 MAX_EVENT_LIMIT = 500
+PROXY_TIMEOUT_S = 5.0
 
 
 def _node_rows(
@@ -86,6 +90,52 @@ def create_app(
         return Response(
             collector.prometheus(),
             content_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    @app.post("/tx")
+    def proxy_tx() -> Response:
+        """Teruskan transaksi ke node pertama yang hidup (kontrak tx_generator)."""
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "body harus berupa JSON object"}), 400
+
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        failures: list[str] = []
+        for record in registry.all():
+            if not record.rest_url:
+                continue
+            target = f"{record.rest_url.rstrip('/')}/tx"
+            outgoing = urllib.request.Request(
+                target,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(outgoing, timeout=PROXY_TIMEOUT_S) as response:
+                    raw = response.read()
+                    status = response.status
+                    content_type = response.headers.get("Content-Type", "application/json")
+            except urllib.error.HTTPError as exc:
+                # Validasi ditolak node; teruskan status dan body aslinya.
+                return Response(
+                    exc.read(),
+                    status=exc.code,
+                    content_type=exc.headers.get("Content-Type", "application/json"),
+                )
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                failures.append(f"{record.node_id}: {exc}")
+                continue
+            return Response(raw, status=status, content_type=content_type)
+
+        return (
+            jsonify(
+                {
+                    "error": "tidak ada node yang bisa menerima transaksi",
+                    "details": failures,
+                }
+            ),
+            502,
         )
 
     @app.after_request

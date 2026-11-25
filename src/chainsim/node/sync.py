@@ -201,6 +201,7 @@ class SyncService:
         self._on_chain_updated = on_chain_updated
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
 
     @property
@@ -231,10 +232,15 @@ class SyncService:
                 logger.exception("on_chain_updated callback failed for %s", self._node_id)
         return pulled
 
+    def request_sync(self) -> None:
+        """Ask the background loop to catch up soon without blocking the caller."""
+        self._wake.set()
+
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
+        self._wake.clear()
         self._thread = threading.Thread(
             target=self._run,
             name=f"sync-{self._node_id}",
@@ -244,6 +250,7 @@ class SyncService:
 
     def stop(self, timeout_s: float = 5.0) -> None:
         self._stop.set()
+        self._wake.set()
         thread = self._thread
         if thread is not None:
             thread.join(timeout=timeout_s)
@@ -260,5 +267,5 @@ class SyncService:
                 self.sync_now()
             except Exception:
                 logger.exception("periodic sync failed for %s", self._node_id)
-            if self._stop.wait(self._interval_s):
-                return
+            self._wake.wait(self._interval_s)
+            self._wake.clear()

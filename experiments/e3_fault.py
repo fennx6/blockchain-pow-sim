@@ -111,6 +111,7 @@ class RunConfig:
     target: str
     nodes: tuple[str, ...]
     difficulty: int
+    f1_difficulty: int
     downtime_s: float
     network_timeout_s: float
     sync_timeout_s: float
@@ -169,14 +170,12 @@ def reassignment_time_s(
 
 
 def job_completed_after(events: Sequence[LogEvent], job_id: str, after_ts_ms: int) -> bool:
-    """True bila job pool tetap menghasilkan blok setelah worker mati."""
+    """True bila job pool benar-benar menghasilkan blok yang masuk rantai."""
     for event in events:
         if event.ts_ms < after_ts_ms:
             continue
         if event.fields.get("job_id") != job_id:
             continue
-        if event.event in {"job_done", "job_finished"}:
-            return True
         if event.event == "block_mined":
             return True
     return False
@@ -251,15 +250,18 @@ class DockerController:
         self._logs_dir = logs_dir
         self._dry_run = dry_run
 
-    def up(self, *, mining_mode: str, build: bool = True) -> None:
+    def up(self, *, mining_mode: str, difficulty: int | None = None, build: bool = True) -> None:
         args = ["up", "-d"]
         if build:
             args.append("--build")
+        env = {"MINING_MODE": mining_mode, "LOG_DIR": str(self._logs_dir)}
+        if difficulty is not None:
+            env["DIFFICULTY"] = str(difficulty)
         compose(
             *args,
             compose_file=self._compose_file,
             dry_run=self._dry_run,
-            env={"MINING_MODE": mining_mode, "LOG_DIR": str(self._logs_dir)},
+            env=env,
         )
 
     def down(self, *, volumes: bool = False) -> None:
@@ -319,6 +321,7 @@ def _record(
     cfg: RunConfig,
     mode: str,
     trial: int,
+    difficulty: int | None = None,
 ) -> None:
     ctx.record(
         metric=metric,
@@ -326,53 +329,96 @@ def _record(
         unit=unit,
         n_nodes=len(cfg.nodes),
         mode=mode,
-        difficulty=cfg.difficulty,
+        difficulty=difficulty if difficulty is not None else cfg.difficulty,
         trial=trial,
     )
+
+
+def _active_job(events: Sequence[LogEvent], since_ts_ms: int) -> LogEvent | None:
+    """Return the newest job_assigned that has not produced a block yet."""
+    for event in events:
+        if event.ts_ms < since_ts_ms or event.event != "job_assigned":
+            continue
+        job_id = str(event.fields.get("job_id") or "")
+        if job_id and not job_completed_after(events, job_id, event.ts_ms):
+            return event
+    return None
 
 
 def run_f1(
     ctx: RunContext, controller: DockerController, cfg: RunConfig, trial: int
 ) -> bool:
     """Worker mati saat job pool berjalan; ukur deteksi, reassignment, hasil."""
-    controller.up(mining_mode="pool")
+    # A job at the default difficulty lasts milliseconds, shorter than
+    # ``docker stop``. F1 therefore uses a calibrated difficulty so the job is
+    # still running when the worker disappears. It is recorded in the CSV.
+    controller.up(mining_mode="pool", difficulty=cfg.f1_difficulty)
     since = _now_ms()
     if not controller.wait(
-        lambda: _first_after(_events(cfg.logs_dir), "job_assigned", since) is not None,
+        lambda: _active_job(_events(cfg.logs_dir), since) is not None,
         cfg.job_timeout_s,
-        "job pool pertama (F1)",
+        "job pool aktif (F1)",
     ):
         logger.error(
-            "F1 trial %d: tidak ada job_assigned. Mode pool membutuhkan SubmitTemplate "
-            "dari node; lihat docs/b-notes-for-c.md Fitur 5.",
+            "F1 trial %d: tidak ada job pool yang masih berjalan. Naikkan "
+            "--f1-difficulty (sekarang %d) agar satu job bertahan lebih lama "
+            "daripada waktu docker stop.",
             trial,
+            cfg.f1_difficulty,
         )
         return False
 
-    assigned = _first_after(_events(cfg.logs_dir), "job_assigned", since)
-    job_id = str(assigned.fields.get("job_id") or "") if assigned is not None else ""
-    controller.fault("stop", cfg.target)
-    fault_ts = _now_ms()
+    assigned = _active_job(_events(cfg.logs_dir), since)
+    assert assigned is not None
+    job_id = str(assigned.fields.get("job_id") or "")
+    try:
+        controller.fault("stop", cfg.target)
+        fault_ts = _now_ms()
 
-    controller.wait(
-        lambda: job_completed_after(_events(cfg.logs_dir), job_id, fault_ts),
-        cfg.network_timeout_s,
-        "job pool selesai setelah worker mati (F1)",
-    )
-    events = _events(cfg.logs_dir)
-    detection = detection_time_s(events, cfg.target, fault_ts)
-    reassignment = reassignment_time_s(events, job_id, fault_ts)
-    found = job_completed_after(events, job_id, fault_ts)
-
-    if detection is not None:
-        _record(ctx, "detection_time_s", detection, "s", cfg=cfg, mode="pool", trial=trial)
-    if reassignment is not None:
-        _record(
-            ctx, "reassignment_time_s", reassignment, "s", cfg=cfg, mode="pool", trial=trial
+        controller.wait(
+            lambda: job_completed_after(_events(cfg.logs_dir), job_id, fault_ts),
+            cfg.network_timeout_s,
+            "job pool selesai setelah worker mati (F1)",
         )
-    _record(ctx, "block_found", 1.0 if found else 0.0, "bool", cfg=cfg, mode="pool", trial=trial)
+        events = _events(cfg.logs_dir)
+        detection = detection_time_s(events, cfg.target, fault_ts)
+        reassignment = reassignment_time_s(events, job_id, fault_ts)
+        found = job_completed_after(events, job_id, fault_ts)
 
-    controller.fault("start", cfg.target)
+        if detection is not None:
+            _record(
+                ctx,
+                "detection_time_s",
+                detection,
+                "s",
+                cfg=cfg,
+                mode="pool",
+                trial=trial,
+                difficulty=cfg.f1_difficulty,
+            )
+        if reassignment is not None:
+            _record(
+                ctx,
+                "reassignment_time_s",
+                reassignment,
+                "s",
+                cfg=cfg,
+                mode="pool",
+                trial=trial,
+                difficulty=cfg.f1_difficulty,
+            )
+        _record(
+            ctx,
+            "block_found",
+            1.0 if found else 0.0,
+            "bool",
+            cfg=cfg,
+            mode="pool",
+            trial=trial,
+            difficulty=cfg.f1_difficulty,
+        )
+    finally:
+        controller.fault("start", cfg.target)
     return detection is not None and reassignment is not None and found
 
 
@@ -380,7 +426,7 @@ def run_f2(
     ctx: RunContext, controller: DockerController, cfg: RunConfig, trial: int
 ) -> bool:
     """Node mati lalu hidup lagi dengan volume utuh; ukur waktu sync."""
-    controller.up(mining_mode="compete")
+    controller.up(mining_mode="compete", difficulty=cfg.difficulty)
     since = _now_ms()
     if not controller.wait(
         lambda: mined_after(_events(cfg.logs_dir), since) >= 2,
@@ -413,7 +459,7 @@ def run_f3(
     ctx: RunContext, controller: DockerController, cfg: RunConfig, trial: int
 ) -> bool:
     """Volume node dihapus; ukur full sync dari genesis."""
-    controller.up(mining_mode="compete")
+    controller.up(mining_mode="compete", difficulty=cfg.difficulty)
     since = _now_ms()
     if not controller.wait(
         lambda: mined_after(_events(cfg.logs_dir), since) >= 2,
@@ -424,7 +470,7 @@ def run_f3(
         return False
 
     controller.fault("remove-volume", cfg.target)
-    controller.up(mining_mode="compete", build=False)
+    controller.up(mining_mode="compete", difficulty=cfg.difficulty, build=False)
     action_ts = _now_ms()
 
     if not controller.wait(
@@ -445,7 +491,7 @@ def run_f4(
     ctx: RunContext, controller: DockerController, cfg: RunConfig, trial: int
 ) -> bool:
     """Partisi jaringan lalu sambungkan lagi; ukur fork dan rekonsiliasi."""
-    controller.up(mining_mode="compete")
+    controller.up(mining_mode="compete", difficulty=cfg.difficulty)
     since = _now_ms()
     if not controller.wait(
         lambda: mined_after(_events(cfg.logs_dir), since) >= 2,
@@ -490,7 +536,7 @@ def run_f5(
     ctx: RunContext, controller: DockerController, cfg: RunConfig, trial: int
 ) -> bool:
     """Coordinator mati; pastikan node tetap bertukar blok dengan peer tersimpan."""
-    controller.up(mining_mode="compete")
+    controller.up(mining_mode="compete", difficulty=cfg.difficulty)
     since = _now_ms()
     if not controller.wait(
         lambda: mined_after(_events(cfg.logs_dir), since) >= 1,
@@ -558,6 +604,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--network-timeout", type=float, default=DEFAULT_NETWORK_TIMEOUT_S)
     parser.add_argument("--sync-timeout", type=float, default=DEFAULT_SYNC_TIMEOUT_S)
     parser.add_argument("--job-timeout", type=float, default=DEFAULT_JOB_TIMEOUT_S)
+    parser.add_argument(
+        "--f1-difficulty",
+        type=int,
+        default=None,
+        help=(
+            "difficulty khusus F1 agar job pool bertahan saat docker stop "
+            "(default: max(difficulty + 2, 6))"
+        ),
+    )
     return parser
 
 
@@ -576,6 +631,7 @@ def _log_plan(args: argparse.Namespace, scenarios: Sequence[str]) -> None:
     logger.info("  target service: %s", args.target_service)
     logger.info("  compose: %s", args.compose_file)
     logger.info("  logs: %s", args.logs_dir)
+    logger.info("  f1 difficulty: %s", getattr(args, "f1_difficulty", None) or "auto")
     logger.info("  keluaran: %s", args.output_dir / f"{EXPERIMENT_NAME}.csv")
 
 
@@ -586,6 +642,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.downtime <= 0:
         logger.error("--downtime harus > 0")
+        return 2
+    if args.f1_difficulty is not None and args.f1_difficulty < 1:
+        logger.error("--f1-difficulty minimal 1")
         return 2
     try:
         scenarios = parse_scenarios(args.scenarios)
@@ -600,12 +659,18 @@ def main(argv: list[str] | None = None) -> int:
     from chainsim.config import load_settings
 
     settings = load_settings()
+    f1_difficulty = (
+        args.f1_difficulty
+        if args.f1_difficulty is not None
+        else max(settings.blockchain.difficulty + 2, 6)
+    )
     cfg = RunConfig(
         compose_file=args.compose_file,
         logs_dir=args.logs_dir,
         target=args.target_service,
         nodes=tuple(part.strip() for part in args.nodes.split(",") if part.strip()),
         difficulty=settings.blockchain.difficulty,
+        f1_difficulty=f1_difficulty,
         downtime_s=args.downtime,
         network_timeout_s=args.network_timeout,
         sync_timeout_s=args.sync_timeout,
