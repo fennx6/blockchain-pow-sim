@@ -19,8 +19,10 @@ from flask import Flask
 
 from chainsim.config import Settings, load_settings
 from chainsim.coordinator.scheduler import WorkResult
+from chainsim.core.block import compute_merkle_root
 from chainsim.core.chain import Blockchain
 from chainsim.core.mempool import Mempool
+from chainsim.core.pow import is_valid_pow
 from chainsim.logging_utils import log_event
 from chainsim.node.api import create_app
 from chainsim.node.gossip import ClientFactory as GossipClientFactory
@@ -202,20 +204,45 @@ class NodeRuntime:
         self.miner.stop_work(job_id)
         return True, "stopped"
 
+    def _pool_candidate_problem(self, block: Block) -> str | None:
+        """Return why a pool candidate cannot extend the current tip, if any."""
+        tip = self.chain.tip()
+        if block.index != tip.index + 1:
+            return "non_sequential_index"
+        if block.prev_hash != tip.hash:
+            return "unknown_parent"
+        if block.difficulty != self.chain.difficulty:
+            return "wrong_difficulty"
+        if not is_valid_pow(block):
+            return "invalid_pow"
+        if block.merkle_root != compute_merkle_root(block.transactions):
+            return "invalid_merkle_root"
+
+        seen: set[str] = set()
+        for tx in block.transactions:
+            if tx.tx_id in seen or self.chain.has_transaction(tx.tx_id):
+                return "duplicate_tx"
+            seen.add(tx.tx_id)
+        return None
+
     def handle_work_result(self, assignment: WorkAssignment, block: Block | None) -> None:
-        """Accept, broadcast, and report a pool-mode winner."""
+        """Report a pool candidate before committing it to the local chain.
+
+        The coordinator returns ``ack.ok=True`` only for the first found result
+        of a job. Losers must not add or broadcast their candidate, otherwise
+        every worker creates a same-index side branch with equal work.
+        """
         if block is None:
             return
 
-        result = self.chain.add_block(block)
-        if result not in (AddResult.ACCEPTED, AddResult.FORK_SWITCHED):
+        problem = self._pool_candidate_problem(block)
+        if problem is not None:
             logger.warning(
-                "pool block %s was not added (%s); not reporting", block.hash, result.value
+                "pool candidate %s rejected locally (%s); not reporting",
+                block.hash,
+                problem,
             )
             return
-
-        self.miner.notify_new_block()
-        self.gossip.broadcast_block(block)
 
         if self.coordinator_client is None:
             logger.warning(
@@ -224,6 +251,7 @@ class NodeRuntime:
                 block.hash,
             )
             return
+
         result = WorkResult(
             job_id=assignment.job_id,
             node_id=self.node_id,
@@ -237,11 +265,25 @@ class NodeRuntime:
             logger.exception("failed to submit work result for job %s", assignment.job_id)
             return
         if not ack.ok:
-            logger.warning(
-                "coordinator rejected work result for job %s: %s",
+            logger.debug(
+                "pool candidate %s was not selected for job %s: %s",
+                block.hash,
                 assignment.job_id,
                 ack.message,
             )
+            return
+
+        add_result = self.chain.add_block(block)
+        if add_result not in (AddResult.ACCEPTED, AddResult.FORK_SWITCHED):
+            logger.warning(
+                "winning pool block %s was not added (%s); not broadcasting",
+                block.hash,
+                add_result.value,
+            )
+            return
+
+        self.miner.notify_new_block()
+        self.gossip.broadcast_block(block)
 
     def start(self, *, start_miner: bool = True) -> None:
         """Start gRPC, catch up once, then start periodic sync and mining."""

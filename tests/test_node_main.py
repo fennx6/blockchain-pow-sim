@@ -114,7 +114,8 @@ class _FakeSyncClient:
 
 
 class _FakeCoordinatorClient:
-    def __init__(self) -> None:
+    def __init__(self, *, ok: bool = True) -> None:
+        self.ok = ok
         self.results: list[WorkResult] = []
         self.closed = False
 
@@ -124,7 +125,7 @@ class _FakeCoordinatorClient:
 
     def submit_work_result(self, result: WorkResult) -> PeerCallResult:
         self.results.append(result)
-        return PeerCallResult("coordinator:50052", True, "ok")
+        return PeerCallResult("coordinator:50052", self.ok, "ok" if self.ok else "lost")
 
     def close(self) -> None:
         self.closed = True
@@ -242,6 +243,83 @@ def test_runtime_handle_work_result_skips_invalid_block(tmp_path: Path, log_dir_
         runtime.stop()
 
     assert fake.results == []
+
+
+def test_runtime_pool_loser_does_not_commit_candidate(tmp_path: Path, log_dir_env: Path) -> None:
+    fake = _FakeCoordinatorClient(ok=False)
+    runtime = NodeRuntime(
+        _settings(tmp_path, mode="pool"),
+        data_dir=tmp_path,
+        grpc_port=0,
+        coordinator_client=fake,
+    )
+    try:
+        block = _block(runtime.chain.tip(), [_tx(1)])
+        assignment = WorkAssignment("job-1", runtime.chain.tip(), 0, 1_000)
+        runtime.handle_work_result(assignment, block)
+        assert runtime.chain.height() == 0
+        assert runtime.chain.tip().hash == runtime.chain.genesis.hash
+    finally:
+        runtime.stop()
+
+    assert len(fake.results) == 1
+    assert fake.results[0].block_hash == block.hash
+
+
+def test_runtime_pool_loser_converges_to_winner_block(tmp_path: Path, log_dir_env: Path) -> None:
+    winner_fake = _FakeCoordinatorClient(ok=True)
+    loser_fake = _FakeCoordinatorClient(ok=False)
+    winner = NodeRuntime(
+        _settings(tmp_path, mode="pool", node_id="node-a"),
+        data_dir=tmp_path / "a",
+        grpc_port=0,
+        coordinator_client=winner_fake,
+    )
+    loser = NodeRuntime(
+        _settings(tmp_path, mode="pool", node_id="node-b"),
+        data_dir=tmp_path / "b",
+        grpc_port=0,
+        coordinator_client=loser_fake,
+    )
+    try:
+        winner_block = _block(winner.chain.tip(), [_tx(1)])
+        loser_block = _block(loser.chain.tip(), [_tx(2)])
+        winner_assignment = WorkAssignment("job-1", winner.chain.tip(), 0, 1_000)
+        loser_assignment = WorkAssignment("job-1", loser.chain.tip(), 0, 1_000)
+
+        winner.handle_work_result(winner_assignment, winner_block)
+        loser.handle_work_result(loser_assignment, loser_block)
+
+        assert winner.chain.height() == 1
+        assert winner.chain.tip().hash == winner_block.hash
+        assert loser.chain.height() == 0
+        assert loser.chain.tip().hash == loser.chain.genesis.hash
+
+        assert loser.handle_block(winner_block) == (True, "accepted")
+        assert loser.chain.tip().hash == winner.chain.tip().hash
+    finally:
+        winner.stop()
+        loser.stop()
+
+
+def test_runtime_pool_without_coordinator_does_not_commit(
+    tmp_path: Path, log_dir_env: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("COORDINATOR_GRPC", raising=False)
+    runtime = NodeRuntime(
+        _settings(tmp_path, mode="pool"),
+        data_dir=tmp_path,
+        grpc_port=0,
+        coordinator_client=None,
+    )
+    try:
+        block = _block(runtime.chain.tip(), [_tx(1)])
+        assignment = WorkAssignment("job-1", runtime.chain.tip(), 0, 1_000)
+        runtime.handle_work_result(assignment, block)
+        assert runtime.chain.height() == 0
+        assert runtime.chain.tip().hash == runtime.chain.genesis.hash
+    finally:
+        runtime.stop()
 
 
 def test_runtime_handle_block_duplicate_and_invalid(tmp_path: Path, log_dir_env: Path) -> None:
