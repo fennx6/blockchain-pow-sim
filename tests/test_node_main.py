@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import json
+import signal
 import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
 
 from chainsim.config import Settings, load_settings
+from chainsim.coordinator.registry import NodeRecord
 from chainsim.coordinator.scheduler import WorkResult
 from chainsim.core.block import build_block_template, create_genesis_block
 from chainsim.core.pow import mine
 from chainsim.core.transaction import create_transaction
-from chainsim.node.grpc_client import NodeClient, PeerCallResult
+from chainsim.node import main as node_main
+from chainsim.node.grpc_client import JobStartResult, NodeClient, PeerCallResult
 from chainsim.node.main import NodeRuntime
 from chainsim.types import Block, NodeStatus, Transaction, WorkAssignment
 
@@ -114,14 +117,25 @@ class _FakeSyncClient:
 
 
 class _FakeCoordinatorClient:
-    def __init__(self, *, ok: bool = True) -> None:
+    def __init__(self, *, ok: bool = True, peers: Sequence[NodeRecord] = ()) -> None:
         self.ok = ok
+        self.peers = list(peers)
+        self.registrations: list[NodeRecord] = []
+        self.templates: list[tuple[str, Block]] = []
         self.results: list[WorkResult] = []
         self.closed = False
 
     @property
     def address(self) -> str:
         return "coordinator:50052"
+
+    def register(self, record: NodeRecord) -> list[NodeRecord]:
+        self.registrations.append(record)
+        return list(self.peers)
+
+    def submit_template(self, node_id: str, block_template: Block) -> JobStartResult:
+        self.templates.append((node_id, block_template))
+        return JobStartResult(True, f"job-{block_template.index}-{len(self.templates)}", "started")
 
     def submit_work_result(self, result: WorkResult) -> PeerCallResult:
         self.results.append(result)
@@ -215,13 +229,18 @@ def test_runtime_handle_work_result_reports_to_coordinator(
     finally:
         runtime.stop()
 
-    assert len(fake.results) == 1
-    result = fake.results[0]
-    assert result.job_id == "job-1"
-    assert result.node_id == "node-1"
-    assert result.nonce == block.nonce
-    assert result.found is True
-    assert result.block_hash == block.hash
+    assert len(fake.results) == 2
+    found_result, exhausted_result = fake.results
+    assert found_result.job_id == "job-1"
+    assert found_result.node_id == "node-1"
+    assert found_result.nonce == block.nonce
+    assert found_result.found is True
+    assert found_result.block_hash == block.hash
+    assert exhausted_result.job_id == "job-1"
+    assert exhausted_result.node_id == "node-1"
+    assert exhausted_result.nonce == 999
+    assert exhausted_result.found is False
+    assert exhausted_result.block_hash == ""
     assert fake.closed is True
 
 
@@ -446,3 +465,129 @@ def test_runtime_cleans_self_peer_and_status_meta(tmp_path: Path, log_dir_env: P
         assert status.meta["mining_mode"] == "compete"
     finally:
         runtime.stop()
+
+
+def test_runtime_start_registers_and_pool_loop_submits_template(
+    tmp_path: Path, log_dir_env: Path
+) -> None:
+    fake = _FakeCoordinatorClient()
+    runtime = NodeRuntime(
+        _settings(tmp_path, mode="pool"),
+        data_dir=tmp_path,
+        grpc_port=0,
+        coordinator_client=fake,
+        pool_poll_s=0.02,
+    )
+    runtime.start(start_miner=True)
+    try:
+        deadline = time.monotonic() + 2.0
+        while not fake.templates and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        runtime.stop()
+
+    assert len(fake.registrations) == 1
+    assert fake.registrations[0].node_id == "node-1"
+    assert fake.registrations[0].grpc_address == f"node-1:{runtime.grpc_port}"
+    assert len(fake.templates) >= 1
+    submitted_node, template = fake.templates[0]
+    assert submitted_node == "node-1"
+    assert template.index == 1
+    assert template.prev_hash == runtime.chain.genesis.hash
+
+
+def test_runtime_sync_notifies_miner_when_tip_advances(tmp_path: Path, log_dir_env: Path) -> None:
+    peer_chain = _build_chain(2)
+    fake_sync = _FakeSyncClient(peer_chain)
+    runtime = NodeRuntime(
+        _settings(tmp_path, peers="peer-1"),
+        data_dir=tmp_path,
+        grpc_port=0,
+        sync_client_factory=lambda _: fake_sync,
+    )
+    notified = 0
+    original_notify = runtime.miner.notify_new_block
+
+    def tracking_notify() -> None:
+        nonlocal notified
+        notified += 1
+        original_notify()
+
+    runtime.miner.notify_new_block = tracking_notify  # type: ignore[method-assign]
+    try:
+        assert runtime.sync.sync_now() == 2
+        assert notified == 1
+        assert runtime.sync.sync_now() == 0
+        assert notified == 1
+    finally:
+        runtime.stop()
+
+
+def test_main_handles_sigterm_gracefully(tmp_path: Path, log_dir_env: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(node_main, "load_settings", lambda: settings)
+
+    stopped = False
+    original_stop = NodeRuntime.stop
+    real_init = NodeRuntime.__init__
+
+    def patched_init(self: NodeRuntime, s: Settings, **kw) -> None:
+        real_init(self, s, data_dir=tmp_path, grpc_port=0, **kw)
+
+    def spy_stop(self: NodeRuntime, *, grpc_grace_s: float = 1.0) -> None:
+        nonlocal stopped
+        stopped = True
+        original_stop(self, grpc_grace_s=grpc_grace_s)
+
+    def trigger_sigterm(self: NodeRuntime) -> None:
+        signal.raise_signal(signal.SIGTERM)
+
+    previous = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(NodeRuntime, "__init__", patched_init)
+    monkeypatch.setattr(NodeRuntime, "stop", spy_stop)
+    monkeypatch.setattr(NodeRuntime, "run_rest", trigger_sigterm)
+
+    code = node_main.main()
+
+    assert code == 0
+    assert stopped is True
+    assert signal.getsignal(signal.SIGTERM) == previous
+    events = _read_events(log_dir_env, "node-1")
+    event_names = [event["event"] for event in events]
+    assert "node_start" in event_names
+    assert "node_stop" in event_names
+
+
+def test_runtime_pool_mode_end_to_end_with_coordinator(
+    tmp_path: Path, log_dir_env: Path, monkeypatch
+) -> None:
+    from chainsim.coordinator.grpc_server import CoordinatorService
+    from chainsim.coordinator.grpc_server import build_server as build_coord_server
+    from chainsim.coordinator.registry import NodeRegistry
+    from chainsim.coordinator.scheduler import PoolJobManager
+    from chainsim.node.grpc_client import CoordinatorClient
+
+    monkeypatch.setenv("NODE_ADVERTISE_HOST", "127.0.0.1")
+    registry = NodeRegistry()
+    jobs = PoolJobManager(registry, nonce_space=100_000)
+    coord_service = CoordinatorService(registry, jobs, timeout_s=1.0)
+    coord_server, coord_port = build_coord_server(coord_service, host="127.0.0.1", port=0)
+    coord_server.start()
+
+    runtime = NodeRuntime(
+        _settings(tmp_path, mode="pool"),
+        data_dir=tmp_path,
+        grpc_port=0,
+        coordinator_client=CoordinatorClient(f"127.0.0.1:{coord_port}", timeout_s=1.0),
+        pool_poll_s=0.02,
+    )
+    try:
+        runtime.start(start_miner=True)
+        deadline = time.monotonic() + 5.0
+        while runtime.chain.height() < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert runtime.chain.height() >= 1
+        assert registry.get("node-1") is not None
+    finally:
+        runtime.stop()
+        coord_server.stop(0)

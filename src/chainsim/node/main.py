@@ -12,14 +12,17 @@ from __future__ import annotations
 import logging
 import os
 import re
+import signal
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 
 from flask import Flask
 
 from chainsim.config import Settings, load_settings
+from chainsim.coordinator.registry import NodeRecord
 from chainsim.coordinator.scheduler import WorkResult
-from chainsim.core.block import compute_merkle_root
+from chainsim.core.block import build_block_template, compute_merkle_root
 from chainsim.core.chain import Blockchain
 from chainsim.core.mempool import Mempool
 from chainsim.core.pow import is_valid_pow
@@ -27,7 +30,7 @@ from chainsim.logging_utils import log_event
 from chainsim.node.api import create_app
 from chainsim.node.gossip import ClientFactory as GossipClientFactory
 from chainsim.node.gossip import Gossip
-from chainsim.node.grpc_client import CoordinatorClient
+from chainsim.node.grpc_client import CoordinatorClient, JobStartResult
 from chainsim.node.grpc_server import NodeService, build_server
 from chainsim.node.miner import Miner
 from chainsim.node.sync import ClientFactory as SyncClientFactory
@@ -38,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DATA_DIR = "data"
 DEFAULT_BIND_HOST = "0.0.0.0"
+DEFAULT_POOL_POLL_S = 0.25
 
 
 def _clean_peers(peers: Sequence[str], node_id: str) -> tuple[str, ...]:
@@ -83,11 +87,14 @@ class NodeRuntime:
         sync_client_factory: SyncClientFactory | None = None,
         gossip_client_factory: GossipClientFactory | None = None,
         coordinator_client: CoordinatorClient | None = None,
+        pool_poll_s: float | None = None,
     ) -> None:
         self.settings = settings
         self.node_id = settings.node.node_id.strip()
         if not self.node_id:
             raise ValueError("node_id must be a non-empty string")
+        if pool_poll_s is not None and pool_poll_s <= 0:
+            raise ValueError(f"pool_poll_s must be > 0, got {pool_poll_s!r}")
 
         self.peers = _clean_peers(settings.node.peers, self.node_id)
         self.storage_path = _storage_path(data_dir, self.node_id)
@@ -112,8 +119,18 @@ class NodeRuntime:
             interval_s=settings.network.heartbeat_interval_s,
             timeout_s=settings.network.grpc_timeout_s,
             client_factory=sync_client_factory,
+            on_chain_updated=self._on_chain_synced,
         )
         self.coordinator_client = coordinator_client or _coordinator_client_from_env(settings)
+        self._registered = False
+        self._pool_poll_s = (
+            pool_poll_s
+            if pool_poll_s is not None
+            else min(DEFAULT_POOL_POLL_S, settings.network.heartbeat_interval_s)
+        )
+        self._pool_stop = threading.Event()
+        self._pool_wake = threading.Event()
+        self._pool_thread: threading.Thread | None = None
 
         self.miner = Miner(
             node_id=self.node_id,
@@ -225,14 +242,90 @@ class NodeRuntime:
             seen.add(tx.tx_id)
         return None
 
+    def _on_chain_synced(self) -> None:
+        """Interrupt active mining when periodic or orphan sync updates the tip."""
+        self.miner.notify_new_block()
+
+    def node_record(self) -> NodeRecord:
+        """Build the coordinator registration record for this node."""
+        host = (os.environ.get("NODE_ADVERTISE_HOST") or self.node_id).strip() or self.node_id
+        return NodeRecord(
+            node_id=self.node_id,
+            rest_url=f"http://{host}:{self.settings.node.rest_port}",
+            grpc_address=f"{host}:{self.grpc_port}",
+            peers=tuple(self.gossip.peers()),
+        )
+
+    def register_with_coordinator(self) -> bool:
+        """Register this node with the coordinator gRPC service when configured."""
+        if self.coordinator_client is None:
+            return False
+        try:
+            peers = self.coordinator_client.register(self.node_record())
+        except Exception as exc:
+            logger.warning("coordinator registration failed for %s: %s", self.node_id, exc)
+            return False
+        self._registered = True
+        if not self.gossip.peers() and peers:
+            discovered = _clean_peers(
+                [record.grpc_address or record.node_id for record in peers],
+                self.node_id,
+            )
+            if discovered:
+                self.gossip.set_peers(discovered)
+        return True
+
+    def submit_pool_template(self) -> JobStartResult | None:
+        """Build a block template on the current tip and request a pool job."""
+        if self.miner.mode != "pool" or self.coordinator_client is None:
+            return None
+        if not self._registered:
+            self.register_with_coordinator()
+        tip = self.chain.tip()
+        txs = self.mempool.select(self.settings.node.block_size)
+        eligible_txs = [tx for tx in txs if not self.chain.has_transaction(tx.tx_id)]
+        template = build_block_template(
+            index=tip.index + 1,
+            prev_hash=tip.hash,
+            transactions=eligible_txs,
+            difficulty=self.chain.difficulty,
+            miner_id=self.node_id,
+        )
+        try:
+            return self.coordinator_client.submit_template(self.node_id, template)
+        except Exception as exc:
+            logger.warning("submit_template failed for %s: %s", self.node_id, exc)
+            return None
+
+    def _pool_submit_loop(self) -> None:
+        while not self._pool_stop.is_set():
+            if self.miner.state() == "idle":
+                self.submit_pool_template()
+            self._pool_wake.wait(self._pool_poll_s)
+            self._pool_wake.clear()
+
     def handle_work_result(self, assignment: WorkAssignment, block: Block | None) -> None:
-        """Report a pool candidate before committing it to the local chain.
+        """Report a pool candidate (or range exhaustion) to the coordinator.
 
         The coordinator returns ``ack.ok=True`` only for the first found result
         of a job. Losers must not add or broadcast their candidate, otherwise
         every worker creates a same-index side branch with equal work.
         """
         if block is None:
+            if self.coordinator_client is None:
+                return
+            last_nonce = max(assignment.nonce_start, assignment.nonce_end - 1)
+            exhausted = WorkResult(
+                job_id=assignment.job_id,
+                node_id=self.node_id,
+                nonce=last_nonce,
+                found=False,
+                block_hash="",
+            )
+            try:
+                self.coordinator_client.submit_work_result(exhausted)
+            except Exception:
+                logger.exception("failed to report exhausted range for job %s", assignment.job_id)
             return
 
         problem = self._pool_candidate_problem(block)
@@ -284,13 +377,15 @@ class NodeRuntime:
 
         self.miner.notify_new_block()
         self.gossip.broadcast_block(block)
+        self._pool_wake.set()
 
     def start(self, *, start_miner: bool = True) -> None:
-        """Start gRPC, catch up once, then start periodic sync and mining."""
+        """Start gRPC, register with coordinator, catch up, then start sync and mining."""
         if self._grpc_started:
             return
         self.grpc_server.start()
         self._grpc_started = True
+        self.register_with_coordinator()
         try:
             self.sync.sync_now()
         except Exception:
@@ -298,9 +393,23 @@ class NodeRuntime:
         self.sync.start()
         if start_miner:
             self.miner.start()
+            if self.miner.mode == "pool" and self.coordinator_client is not None:
+                self._pool_stop.clear()
+                self._pool_wake.clear()
+                self._pool_thread = threading.Thread(
+                    target=self._pool_submit_loop,
+                    name=f"pool-submit-{self.node_id}",
+                    daemon=True,
+                )
+                self._pool_thread.start()
 
     def stop(self, *, grpc_grace_s: float = 1.0) -> None:
         """Stop background loops and close peer/coordinator channels."""
+        self._pool_stop.set()
+        self._pool_wake.set()
+        if self._pool_thread is not None:
+            self._pool_thread.join(timeout=2.0)
+            self._pool_thread = None
         self.sync.stop()
         self.miner.stop()
         if self._grpc_started:
@@ -328,6 +437,11 @@ def _safe_log(event: str, node_id: str, **fields: object) -> None:
         logger.exception("failed to write %s event for %s", event, node_id)
 
 
+def _handle_sigterm(signum: int, _frame: object) -> None:
+    logger.info("menerima sinyal %s, menghentikan node", signum)
+    raise SystemExit(0)
+
+
 def main() -> int:
     settings = load_settings()
     logging.basicConfig(
@@ -340,11 +454,19 @@ def main() -> int:
         logger.exception("failed to build node runtime")
         return 1
 
+    previous_sigterm = None
+    installed_sigterm = False
+    if threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGTERM"):
+        previous_sigterm = signal.signal(signal.SIGTERM, _handle_sigterm)
+        installed_sigterm = True
+
     try:
         runtime.start()
     except Exception:
         logger.exception("failed to start node runtime")
         runtime.stop()
+        if installed_sigterm and previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
         return 1
 
     _safe_log(
@@ -363,14 +485,16 @@ def main() -> int:
     return_code = 0
     try:
         runtime.run_rest()
-    except KeyboardInterrupt:
-        logger.info("node dihentikan lewat keyboard")
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("node dihentikan dengan bersih")
     except Exception:
         logger.exception("REST server failed for %s", runtime.node_id)
         return_code = 1
     finally:
         runtime.stop()
         _safe_log("node_stop", runtime.node_id)
+        if installed_sigterm and previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
     return return_code
 
 

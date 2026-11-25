@@ -90,6 +90,12 @@ def test_main_dry_run_does_not_post() -> None:
     assert tx_generator.main(["--dry-run", "--target", "http://example.invalid/tx"]) == 0
 
 
+def test_default_target_includes_tx_path() -> None:
+    assert tx_generator.DEFAULT_TARGET == "http://127.0.0.1:8080/tx"
+    parsed = tx_generator.build_parser().parse_args([])
+    assert parsed.target == "http://127.0.0.1:8080/tx"
+
+
 class _RecordingHandler(BaseHTTPRequestHandler):
     payloads: list[dict] = []
     status = 201

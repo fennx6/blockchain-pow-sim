@@ -99,6 +99,28 @@ def _as_str(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def _normalize_node(value: Any) -> str:
+    """Strip URL scheme and port so ``node-2:50051`` matches ``node-2``."""
+    text = _as_str(value)
+    if not text:
+        return ""
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.rstrip("/")
+    if ":" in text and not text.startswith("["):
+        text = text.rsplit(":", 1)[0]
+    return text
+
+
+def _event_ts(event: LogEvent, field_name: str | None = None) -> int:
+    """Return ``fields[field_name]`` when present and valid, else ``event.ts_ms``."""
+    if field_name:
+        override = _as_int(event.fields.get(field_name))
+        if override is not None:
+            return override
+    return event.ts_ms
+
+
 def load_events(logs_dir: Path | str) -> list[LogEvent]:
     """Read every ``*.jsonl`` file, skip malformed lines, and sort by time."""
     directory = Path(logs_dir)
@@ -139,6 +161,8 @@ def _first_times(
     event_name: str,
     key_func: Callable[[LogEvent], tuple[str, str] | None],
     predicate: Callable[[LogEvent], bool] | None = None,
+    *,
+    ts_field: str | None = None,
 ) -> dict[tuple[str, str], int]:
     first: dict[tuple[str, str], int] = {}
     for event in events:
@@ -149,7 +173,9 @@ def _first_times(
         key = key_func(event)
         if key is None:
             continue
-        first.setdefault(key, event.ts_ms)
+        ts = _event_ts(event, ts_field)
+        if key not in first or ts < first[key]:
+            first[key] = ts
     return first
 
 
@@ -163,25 +189,26 @@ def _not_rejected(event: LogEvent) -> bool:
 
 def _tx_forwarded_key(event: LogEvent) -> tuple[str, str] | None:
     tx_id = _as_str(event.fields.get("tx_id"))
-    to_node = _as_str(event.fields.get("to_node"))
+    to_node = _normalize_node(event.fields.get("to_node"))
     return (tx_id, to_node) if tx_id and to_node else None
 
 
 def _tx_received_key(event: LogEvent) -> tuple[str, str] | None:
     tx_id = _as_str(event.fields.get("tx_id"))
-    receiver = _as_str(event.fields.get("to_node")) or event.node_id
+    receiver = _normalize_node(event.fields.get("to_node")) or _normalize_node(event.node_id)
     return (tx_id, receiver) if tx_id and receiver else None
 
 
 def _block_forwarded_key(event: LogEvent) -> tuple[str, str] | None:
     block_hash = _as_str(event.fields.get("block_hash"))
-    to_node = _as_str(event.fields.get("to_node"))
+    to_node = _normalize_node(event.fields.get("to_node"))
     return (block_hash, to_node) if block_hash and to_node else None
 
 
 def _block_received_key(event: LogEvent) -> tuple[str, str] | None:
     block_hash = _as_str(event.fields.get("block_hash"))
-    return (block_hash, event.node_id) if block_hash else None
+    receiver = _normalize_node(event.fields.get("to_node")) or _normalize_node(event.node_id)
+    return (block_hash, receiver) if block_hash and receiver else None
 
 
 def _match_delays(
@@ -200,16 +227,28 @@ def _match_delays(
 def tx_forward_delays(events: Iterable[LogEvent]) -> list[float]:
     """One-way transaction forwarding latency per (tx_id, destination)."""
     materialized = list(events)
-    sent = _first_times(materialized, "tx_forwarded", _tx_forwarded_key, _not_failed)
-    received = _first_times(materialized, "tx_received", _tx_received_key, _not_rejected)
+    sent = _first_times(
+        materialized, "tx_forwarded", _tx_forwarded_key, _not_failed, ts_field="sent_ts_ms"
+    )
+    received = _first_times(
+        materialized, "tx_received", _tx_received_key, _not_rejected, ts_field="received_ts_ms"
+    )
     return _match_delays(sent, received)
 
 
 def block_forward_delays(events: Iterable[LogEvent]) -> list[float]:
     """One-way block forwarding latency per (block_hash, destination)."""
     materialized = list(events)
-    sent = _first_times(materialized, "block_forwarded", _block_forwarded_key, _not_failed)
-    received = _first_times(materialized, "block_received", _block_received_key, _not_rejected)
+    sent = _first_times(
+        materialized, "block_forwarded", _block_forwarded_key, _not_failed, ts_field="sent_ts_ms"
+    )
+    received = _first_times(
+        materialized,
+        "block_received",
+        _block_received_key,
+        _not_rejected,
+        ts_field="received_ts_ms",
+    )
     return _match_delays(sent, received)
 
 
@@ -229,7 +268,10 @@ def propagation_stats(
         elif event.event == "block_received" and _not_rejected(event):
             block_hash = _as_str(event.fields.get("block_hash"))
             if block_hash:
-                received[block_hash].setdefault(event.node_id, event.ts_ms)
+                recv_ts = _event_ts(event, "received_ts_ms")
+                node_map = received[block_hash]
+                if event.node_id not in node_map or recv_ts < node_map[event.node_id]:
+                    node_map[event.node_id] = recv_ts
 
     expected = tuple(dict.fromkeys(str(node) for node in expected_nodes if str(node)))
     delays: list[float] = []

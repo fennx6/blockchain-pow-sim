@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
 from chainsim.logging_utils import log_event
@@ -19,6 +21,19 @@ from chainsim.node.grpc_client import DEFAULT_TIMEOUT_S, NodeClient, PeerCallRes
 from chainsim.types import Block, Transaction
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_WORKERS = 16
+
+
+def peer_node_id(peer: str) -> str:
+    """Return a bare node/host identifier without URL scheme or port."""
+    text = str(peer).strip()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.rstrip("/")
+    if ":" in text and not text.startswith("["):
+        text = text.rsplit(":", 1)[0]
+    return text
 
 
 class GossipClient(Protocol):
@@ -44,18 +59,23 @@ class Gossip:
         peers: Sequence[str],
         timeout_s: float = DEFAULT_TIMEOUT_S,
         client_factory: ClientFactory | None = None,
+        max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> None:
         if not isinstance(node_id, str) or not node_id.strip():
             raise ValueError("node_id must be a non-empty string")
         if timeout_s <= 0:
             raise ValueError(f"timeout_s must be > 0, got {timeout_s!r}")
+        if max_workers < 1:
+            raise ValueError(f"max_workers must be >= 1, got {max_workers!r}")
 
         self._node_id = node_id.strip()
         self._peers = self._clean_peers(peers)
         self._client_factory: ClientFactory = client_factory or (
             lambda address: NodeClient(address, timeout_s=timeout_s)
         )
+        self._max_workers = max_workers
         self._clients: dict[str, GossipClient] = {}
+        self._executor: ThreadPoolExecutor | None = None
         self._lock = threading.Lock()
 
     @staticmethod
@@ -81,10 +101,14 @@ class Gossip:
             self._close_client(client)
 
     def close(self) -> None:
-        """Close every cached peer client."""
+        """Close every cached peer client and stop the broadcast thread pool."""
         with self._lock:
             clients = list(self._clients.values())
             self._clients.clear()
+            executor = self._executor
+            self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=True)
         for client in clients:
             self._close_client(client)
 
@@ -94,47 +118,76 @@ class Gossip:
     def __exit__(self, *_: object) -> None:
         self.close()
 
+    def _get_executor(self) -> ThreadPoolExecutor:
+        with self._lock:
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=self._max_workers,
+                    thread_name_prefix=f"gossip-{self._node_id}",
+                )
+            return self._executor
+
+    def _send_tx_to_peer(self, peer: str, tx: Transaction) -> PeerCallResult:
+        # Capture send time before the RPC so E2 compares send -> arrival rather
+        # than post-Ack logging against the receiver's arrival timestamp.
+        sent_ts_ms = time.time_ns() // 1_000_000
+        try:
+            client = self._client_for(peer)
+            result = client.submit_transaction(tx, from_node=self._node_id)
+        except Exception as exc:
+            result = PeerCallResult(peer, False, str(exc))
+        self._safe_log(
+            "tx_forwarded",
+            tx_id=tx.tx_id,
+            origin_node=tx.origin_node,
+            from_node=self._node_id,
+            to_node=peer_node_id(peer),
+            sent_ts_ms=sent_ts_ms,
+            ok=result.ok,
+            error="" if result.ok else result.message,
+        )
+        return result
+
+    def _send_block_to_peer(self, peer: str, block: Block) -> PeerCallResult:
+        sent_ts_ms = time.time_ns() // 1_000_000
+        try:
+            client = self._client_for(peer)
+            result = client.announce_block(block, from_node=self._node_id)
+        except Exception as exc:
+            result = PeerCallResult(peer, False, str(exc))
+        self._safe_log(
+            "block_forwarded",
+            index=block.index,
+            block_hash=block.hash,
+            from_node=self._node_id,
+            to_node=peer_node_id(peer),
+            sent_ts_ms=sent_ts_ms,
+            ok=result.ok,
+            error="" if result.ok else result.message,
+        )
+        return result
+
     def broadcast_tx(self, tx: Transaction) -> list[PeerCallResult]:
-        """Send ``tx`` to every peer and log one ``tx_forwarded`` event per peer."""
-        results: list[PeerCallResult] = []
-        for peer in self.peers():
-            try:
-                client = self._client_for(peer)
-                result = client.submit_transaction(tx, from_node=self._node_id)
-            except Exception as exc:
-                result = PeerCallResult(peer, False, str(exc))
-            results.append(result)
-            self._safe_log(
-                "tx_forwarded",
-                tx_id=tx.tx_id,
-                origin_node=tx.origin_node,
-                from_node=self._node_id,
-                to_node=peer,
-                ok=result.ok,
-                error="" if result.ok else result.message,
-            )
-        return results
+        """Send ``tx`` to every peer concurrently and log ``tx_forwarded`` per peer."""
+        peers = self.peers()
+        if not peers:
+            return []
+        if len(peers) == 1:
+            return [self._send_tx_to_peer(peers[0], tx)]
+        executor = self._get_executor()
+        futures = [executor.submit(self._send_tx_to_peer, peer, tx) for peer in peers]
+        return [future.result() for future in futures]
 
     def broadcast_block(self, block: Block) -> list[PeerCallResult]:
-        """Send ``block`` to every peer and log one ``block_forwarded`` event per peer."""
-        results: list[PeerCallResult] = []
-        for peer in self.peers():
-            try:
-                client = self._client_for(peer)
-                result = client.announce_block(block, from_node=self._node_id)
-            except Exception as exc:
-                result = PeerCallResult(peer, False, str(exc))
-            results.append(result)
-            self._safe_log(
-                "block_forwarded",
-                index=block.index,
-                block_hash=block.hash,
-                from_node=self._node_id,
-                to_node=peer,
-                ok=result.ok,
-                error="" if result.ok else result.message,
-            )
-        return results
+        """Send ``block`` to every peer concurrently and log ``block_forwarded`` per peer."""
+        peers = self.peers()
+        if not peers:
+            return []
+        if len(peers) == 1:
+            return [self._send_block_to_peer(peers[0], block)]
+        executor = self._get_executor()
+        futures = [executor.submit(self._send_block_to_peer, peer, block) for peer in peers]
+        return [future.result() for future in futures]
 
     def _client_for(self, peer: str) -> GossipClient:
         with self._lock:

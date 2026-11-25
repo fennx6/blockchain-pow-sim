@@ -223,3 +223,73 @@ def test_gossip_reaches_real_node_service(log_dir_env: Path) -> None:
     assert [result.ok for result in block_results] == [True]
     assert received_txs == [tx]
     assert received_blocks == [block]
+
+    sender_events = _read_events(log_dir_env, "node-1")
+    receiver_events = _read_events(log_dir_env, "node-2")
+    tx_fwd = [e for e in sender_events if e["event"] == "tx_forwarded"][0]
+    tx_rcv = [e for e in receiver_events if e["event"] == "tx_received"][0]
+    blk_fwd = [e for e in sender_events if e["event"] == "block_forwarded"][0]
+    blk_rcv = [e for e in receiver_events if e["event"] == "block_received"][0]
+    assert tx_fwd["to_node"] == "127.0.0.1"
+    assert blk_fwd["to_node"] == "127.0.0.1"
+    assert tx_fwd["sent_ts_ms"] <= tx_rcv["received_ts_ms"]
+    assert blk_fwd["sent_ts_ms"] <= blk_rcv["received_ts_ms"]
+
+
+def test_gossip_strips_port_from_logged_to_node(log_dir_env: Path) -> None:
+    clients = {"node-2:50051": _FakeGossipClient("node-2:50051")}
+    gossip = Gossip(
+        node_id="node-1",
+        peers=["node-2:50051"],
+        client_factory=lambda peer: clients[peer],
+    )
+    tx = _tx(9)
+    block = _block(tx)
+    gossip.broadcast_tx(tx)
+    gossip.broadcast_block(block)
+    gossip.close()
+
+    events = _read_events(log_dir_env, "node-1")
+    tx_fwd = [e for e in events if e["event"] == "tx_forwarded"][0]
+    blk_fwd = [e for e in events if e["event"] == "block_forwarded"][0]
+    assert tx_fwd["to_node"] == "node-2"
+    assert blk_fwd["to_node"] == "node-2"
+    assert isinstance(tx_fwd["sent_ts_ms"], int)
+    assert isinstance(blk_fwd["sent_ts_ms"], int)
+
+
+def test_gossip_broadcasts_to_peers_in_parallel(log_dir_env: Path) -> None:
+    tx_barrier = threading.Barrier(2, timeout=2.0)
+    block_barrier = threading.Barrier(2, timeout=2.0)
+
+    class _BarrierClient:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def submit_transaction(self, tx: Transaction, *, from_node: str = "") -> PeerCallResult:
+            tx_barrier.wait()
+            return PeerCallResult(self.name, True, "ok")
+
+        def announce_block(self, block: Block, *, from_node: str = "") -> PeerCallResult:
+            block_barrier.wait()
+            return PeerCallResult(self.name, True, "ok")
+
+        def close(self) -> None:
+            return
+
+    clients = {"node-2": _BarrierClient("node-2"), "node-3": _BarrierClient("node-3")}
+    gossip = Gossip(
+        node_id="node-1",
+        peers=["node-2", "node-3"],
+        client_factory=lambda peer: clients[peer],
+    )
+    try:
+        tx_results = gossip.broadcast_tx(_tx(10))
+        block_results = gossip.broadcast_block(_block(_tx(11)))
+    finally:
+        gossip.close()
+
+    assert [r.peer for r in tx_results] == ["node-2", "node-3"]
+    assert all(r.ok for r in tx_results)
+    assert [r.peer for r in block_results] == ["node-2", "node-3"]
+    assert all(r.ok for r in block_results)
