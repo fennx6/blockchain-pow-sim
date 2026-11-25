@@ -265,6 +265,31 @@ def test_sync_service_background_loop() -> None:
     assert local.height() == 1
 
 
+def test_sync_service_invokes_on_chain_updated_only_when_tip_changes() -> None:
+    local = Blockchain(1)
+    peer_chain = _build_chain(2)
+    client = _FakeSyncClient(peer_chain)
+    notifications = 0
+
+    def on_updated() -> None:
+        nonlocal notifications
+        notifications += 1
+
+    service = SyncService(
+        node_id="node-1",
+        chain=local,
+        peers_provider=lambda: ["peer-1"],
+        interval_s=0.05,
+        client_factory=lambda _: client,
+        on_chain_updated=on_updated,
+    )
+
+    assert service.sync_now() == 2
+    assert notifications == 1
+    assert service.sync_now() == 0
+    assert notifications == 1
+
+
 def test_catch_up_uses_real_node_service(log_dir_env: Path) -> None:
     peer_chain = _build_chain(2)
     service = NodeService(

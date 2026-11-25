@@ -183,6 +183,7 @@ class SyncService:
         interval_s: float,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         client_factory: ClientFactory | None = None,
+        on_chain_updated: Callable[[], None] | None = None,
     ) -> None:
         if not isinstance(node_id, str) or not node_id.strip():
             raise ValueError("node_id must be a non-empty string")
@@ -197,6 +198,7 @@ class SyncService:
         self._interval_s = interval_s
         self._timeout_s = timeout_s
         self._client_factory = client_factory
+        self._on_chain_updated = on_chain_updated
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -212,14 +214,22 @@ class SyncService:
     def sync_now(self, peers: Sequence[str] | None = None) -> int:
         """Run one catch-up synchronously (serialized against the background loop)."""
         with self._lock:
+            before_tip = self._chain.tip().hash
             target = list(peers) if peers is not None else self.peers()
-            return catch_up(
+            pulled = catch_up(
                 self._chain,
                 target,
                 node_id=self._node_id,
                 timeout_s=self._timeout_s,
                 client_factory=self._client_factory,
             )
+            after_tip = self._chain.tip().hash
+        if after_tip != before_tip and self._on_chain_updated is not None:
+            try:
+                self._on_chain_updated()
+            except Exception:
+                logger.exception("on_chain_updated callback failed for %s", self._node_id)
+        return pulled
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():

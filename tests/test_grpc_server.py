@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -252,3 +253,36 @@ def test_build_server_rejects_bad_port() -> None:
     )
     with pytest.raises(ValueError):
         build_server(service, port=70_000)
+
+
+def test_announce_block_records_arrival_timestamp_before_handler(log_dir_env: Path) -> None:
+    tx = _make_tx()
+    block = _make_block(tx)
+
+    def slow_on_block(_incoming):
+        time.sleep(0.05)
+        return True, "accepted"
+
+    service = NodeService(
+        node_id="node-1",
+        on_transaction=lambda item: (True, "accepted"),
+        on_block=slow_on_block,
+        get_blocks=lambda index: [],
+        get_status=_status,
+    )
+    server, port = _start(service)
+    try:
+        with NodeClient(f"127.0.0.1:{port}", timeout_s=1.0) as client:
+            ack = client.announce_block(block, from_node="node-2")
+    finally:
+        server.stop(0)
+
+    assert ack.ok is True
+    events = [
+        json.loads(line)
+        for line in (log_dir_env / "node-1.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    blk_event = [event for event in events if event["event"] == "block_received"][0]
+    assert isinstance(blk_event["received_ts_ms"], int)
+    assert blk_event["ts_ms"] - blk_event["received_ts_ms"] >= 30

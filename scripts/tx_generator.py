@@ -24,7 +24,7 @@ logger = logging.getLogger("tx_generator")
 
 DEFAULT_RATE = 5.0
 DEFAULT_DURATION_S = 60.0
-DEFAULT_TARGET = "http://127.0.0.1:8080"
+DEFAULT_TARGET = "http://127.0.0.1:8080/tx"
 DEFAULT_TIMEOUT_S = 5.0
 DEFAULT_SEED = 0
 MAX_SLEEP_S = 0.05

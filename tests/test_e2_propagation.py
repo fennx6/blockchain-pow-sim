@@ -184,3 +184,70 @@ def test_main_returns_error_for_empty_logs(tmp_path: Path) -> None:
     logs = tmp_path / "empty"
     logs.mkdir()
     assert e2_propagation.main(["--logs-dir", str(logs)]) == 2
+
+
+def test_forward_and_propagation_use_sent_received_ts_and_strip_ports(tmp_path: Path) -> None:
+    """Post-Ack ts_ms ordering and peer:port strings must not drop E2 samples."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        logs / "node-1.jsonl",
+        [
+            {
+                "ts_ms": 1005,
+                "sent_ts_ms": 1000,
+                "node_id": "node-1",
+                "event": "tx_forwarded",
+                "tx_id": "t1",
+                "to_node": "node-2:50051",
+                "ok": True,
+            },
+            {
+                "ts_ms": 2000,
+                "node_id": "node-1",
+                "event": "block_mined",
+                "block_hash": "b1",
+                "tx_count": 1,
+                "index": 1,
+            },
+            {
+                "ts_ms": 2020,
+                "sent_ts_ms": 2001,
+                "node_id": "node-1",
+                "event": "block_forwarded",
+                "block_hash": "b1",
+                "to_node": "node-2:50051",
+                "ok": True,
+            },
+        ],
+    )
+    _write_log(
+        logs / "node-2.jsonl",
+        [
+            {
+                "ts_ms": 1004,
+                "received_ts_ms": 1002,
+                "node_id": "node-2",
+                "event": "tx_received",
+                "tx_id": "t1",
+                "to_node": "node-2",
+                "accepted": True,
+            },
+            {
+                "ts_ms": 2060,
+                "received_ts_ms": 2004,
+                "node_id": "node-2",
+                "event": "block_received",
+                "block_hash": "b1",
+                "to_node": "node-2",
+                "accepted": True,
+            },
+        ],
+    )
+
+    events = e2_propagation.load_events(logs)
+    assert e2_propagation.tx_forward_delays(events) == [2.0]
+    assert e2_propagation.block_forward_delays(events) == [3.0]
+    stats = e2_propagation.propagation_stats(events, ("node-1", "node-2"))
+    assert stats.delays_ms == (4.0,)
+    assert stats.full_coverage_ms == (4.0,)

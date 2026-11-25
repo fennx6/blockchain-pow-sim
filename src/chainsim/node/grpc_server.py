@@ -9,6 +9,7 @@ handlers (``node/main.py``).
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
@@ -91,6 +92,8 @@ class NodeService(blockchain_pb2_grpc.NodeServiceServicer):
     def SubmitTransaction(
         self, request: blockchain_pb2.TransactionMsg, context: grpc.ServicerContext
     ) -> blockchain_pb2.Ack:
+        # Record arrival time immediately before deserialization or local handling.
+        received_ts_ms = time.time_ns() // 1_000_000
         from_node = _from_node(context)
         try:
             tx = tx_from_msg(request)
@@ -102,6 +105,7 @@ class NodeService(blockchain_pb2_grpc.NodeServiceServicer):
                 reason=str(exc),
                 from_node=from_node,
                 to_node=self._node_id,
+                received_ts_ms=received_ts_ms,
             )
             return blockchain_pb2.Ack(ok=False, message=str(exc))
 
@@ -119,12 +123,15 @@ class NodeService(blockchain_pb2_grpc.NodeServiceServicer):
             result=message,
             from_node=from_node,
             to_node=self._node_id,
+            received_ts_ms=received_ts_ms,
         )
         return blockchain_pb2.Ack(ok=ok, message=message)
 
     def AnnounceBlock(
         self, request: blockchain_pb2.BlockMsg, context: grpc.ServicerContext
     ) -> blockchain_pb2.Ack:
+        # Record arrival time before PoW validation, disk persistence, or orphan sync.
+        received_ts_ms = time.time_ns() // 1_000_000
         from_node = _from_node(context)
         try:
             block = block_from_msg(request)
@@ -137,6 +144,7 @@ class NodeService(blockchain_pb2_grpc.NodeServiceServicer):
                 reason=str(exc),
                 from_node=from_node,
                 to_node=self._node_id,
+                received_ts_ms=received_ts_ms,
             )
             return blockchain_pb2.Ack(ok=False, message=str(exc))
 
@@ -156,6 +164,7 @@ class NodeService(blockchain_pb2_grpc.NodeServiceServicer):
             result=message,
             from_node=from_node,
             to_node=self._node_id,
+            received_ts_ms=received_ts_ms,
         )
         return blockchain_pb2.Ack(ok=ok, message=message)
 
