@@ -39,7 +39,7 @@ def test_template_values_are_preserved() -> None:
     assert node["cpus"] == "1.0"
     assert node["build"]["dockerfile"] == "docker/Dockerfile.node"
     assert node["environment"]["LOG_DIR"] == "/app/logs"
-    assert data["services"]["coordinator"]["ports"] == ["127.0.0.1:8080:8080"]
+    assert "ports" not in data["services"]["coordinator"]
     assert not [key for key in data if key.startswith("x-")]
 
 
