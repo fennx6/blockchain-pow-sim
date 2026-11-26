@@ -60,6 +60,11 @@ def build_compose(spec: ComposeSpec) -> dict[str, Any]:
         (template_service.get("environment") or {}).get("NODE_REST_PORT", DEFAULT_REST_PORT)
     )
 
+    # Generated compose lives in experiments/.generated/, so every path that the
+    # template expresses relative to the repo root must be made absolute here.
+    repo_logs = REPO_ROOT / "logs"
+    repo_logs.mkdir(parents=True, exist_ok=True)
+
     for key in [name for name in services if name.startswith(NODE_PREFIX)]:
         del services[key]
     volumes: dict[str, Any] = data.get("volumes") or {}
@@ -80,7 +85,7 @@ def build_compose(spec: ComposeSpec) -> dict[str, Any]:
         if spec.mining_mode is not None:
             environment["MINING_MODE"] = spec.mining_mode
         service["environment"] = environment
-        service["volumes"] = ["./logs:/app/logs", f"{node_id}-data:/app/data"]
+        service["volumes"] = [f"{repo_logs}:/app/logs", f"{node_id}-data:/app/data"]
         node_services[node_id] = service
         volumes[f"{node_id}-data"] = None
 
@@ -90,6 +95,22 @@ def build_compose(spec: ComposeSpec) -> dict[str, Any]:
         f"{node_id}={node_id}:{rest_port}" for node_id in node_ids
     )
     coordinator["environment"] = coordinator_environment
+    coordinator_volumes = list(coordinator.get("volumes") or [])
+    coordinator["volumes"] = [
+        (f"{repo_logs}:/app/logs" if str(item).startswith("./logs") else item)
+        for item in coordinator_volumes
+    ]
+    # E4 runs inside the Docker network (tx load via `compose exec`), so the
+    # coordinator does not need to publish port 8080 to the host. Dropping the
+    # mapping avoids clashing with the default `chainsim` project on 127.0.0.1:8080.
+    coordinator.pop("ports", None)
+
+    # Make build contexts absolute so Docker does not resolve them relative to
+    # experiments/.generated/. The dockerfile stays relative to that context.
+    for service in [coordinator, *node_services.values()]:
+        build = service.get("build")
+        if isinstance(build, dict):
+            build["context"] = str(REPO_ROOT)
 
     data["name"] = spec.project
     data["services"] = {"coordinator": coordinator, **node_services}

@@ -1,0 +1,13 @@
+run_id,timestamp,experiment,n_nodes,mode,difficulty,trial,metric,value,unit
+e3-20261126-162419,2026-11-26T16:26:26+0700,e3_fault,6,compete,4,1,sync_time_s,3.059,s
+e3-20261126-162419,2026-11-26T16:26:26+0700,e3_fault,6,compete,4,1,blocks_pulled,7.0,blocks
+e3-20261126-162419,2026-11-26T16:27:15+0700,e3_fault,6,compete,4,1,full_sync_time_s,2.941,s
+e3-20261126-162419,2026-11-26T16:27:15+0700,e3_fault,6,compete,4,1,blocks_pulled,0.0,blocks
+e3-20261126-162419,2026-11-26T16:29:21+0700,e3_fault,6,compete,4,2,sync_time_s,5.389,s
+e3-20261126-162419,2026-11-26T16:29:21+0700,e3_fault,6,compete,4,2,blocks_pulled,0.0,blocks
+e3-20261126-162419,2026-11-26T16:30:12+0700,e3_fault,6,compete,4,2,full_sync_time_s,2.928,s
+e3-20261126-162419,2026-11-26T16:30:12+0700,e3_fault,6,compete,4,2,blocks_pulled,0.0,blocks
+e3-20261126-162419,2026-11-26T16:32:13+0700,e3_fault,6,compete,4,3,sync_time_s,2.859,s
+e3-20261126-162419,2026-11-26T16:32:13+0700,e3_fault,6,compete,4,3,blocks_pulled,0.0,blocks
+e3-20261126-162419,2026-11-26T16:33:09+0700,e3_fault,6,compete,4,3,full_sync_time_s,4.128,s
+e3-20261126-162419,2026-11-26T16:33:09+0700,e3_fault,6,compete,4,3,blocks_pulled,0.0,blocks
